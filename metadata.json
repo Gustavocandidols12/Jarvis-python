@@ -1,0 +1,8 @@
+
+{
+  "name": "JARVIS Python Refactor",
+  "description": "Refactored version of the JARVIS Hand Tracking and Automation system, organized into a modular architecture for better maintainability.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

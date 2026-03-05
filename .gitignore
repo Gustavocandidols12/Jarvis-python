@@ -1,0 +1,36 @@
+# Ambientes Virtuais
+venv/
+env/
+.env
+.venv
+ENV/
+env.bak/
+venv.bak/
+
+# Chaves / Segredos
+*.pem
+*.key
+
+# Arquivos de Cache / Memória do Jarvis
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+jarvis_memory.json
+jarvis_notes.json
+Jarvis_frames/
+
+# Logs e Arquivos Temporários
+*.log
+*.sqlite
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.DS_Store
+
+# Diretório de backup temporário (local)
+backupFilesLastFunctions/

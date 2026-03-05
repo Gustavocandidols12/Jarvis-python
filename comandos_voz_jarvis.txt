@@ -1,0 +1,208 @@
+╔══════════════════════════════════════════════════════════════════════╗
+║               JARVIS — GUIA DE COMANDOS DE VOZ                      ║
+║         Diga "Jarvis" para ativar, depois o comando abaixo          ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🕐 HORA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Você fala:   "Jarvis, que horas são?"
+               "Jarvis, que hora é?"
+               "Jarvis, me diz a hora"
+               "Jarvis, qual o horário atual?"
+
+  Jarvis fala: "São exatamente 14:32, senhor."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🌤️ CLIMA (agora)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Você fala:   "Jarvis, como está o clima?"
+               "Jarvis, tá frio ou quente?"
+               "Jarvis, que temperatura tá?"
+               "Jarvis, clima"
+
+  Jarvis fala: "Consultando clima, um momento."
+               "Em Brasília, agora temos céu limpo, 28 graus com
+                sensação de 30. Umidade em 45 por cento e vento a
+                12 quilômetros por hora."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 📅 PREVISÃO DO DIA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Você fala:   "Jarvis, previsão do tempo"
+               "Jarvis, vai chover hoje?"
+               "Jarvis, como vai ser o dia?"
+               "Jarvis, levo guarda-chuva?"
+
+  Jarvis fala: "Verificando previsão do dia."
+               "A previsão para hoje em Brasília é de céu limpo,
+                com mínima de 18 e máxima de 32 graus, sem chuva
+                prevista."
+                  — ou —
+               "A previsão para hoje em Brasília é de pancadas de
+                chuva moderadas, com mínima de 20 e máxima de 27
+                graus. Há previsão de 14 milímetros de chuva."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ⏱️ TIMER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Você fala:   "Jarvis, coloca um timer de 10 minutos"
+               "Jarvis, timer de 30 segundos"
+               "Jarvis, me avisa em 1 hora"
+               "Jarvis, timer de 2 horas e 30 minutos para o macarrão"
+
+  Jarvis fala: "Timer de 10 minutos iniciado. Aviso às 15:42, senhor."
+               "Timer 'macarrão' de 2 horas e 30 minutos iniciado.
+                Aviso às 17:10."
+
+  Ao terminar: "Senhor, o timer 'macarrão' finalizou. São 17:10."
+                  — ou —
+               "Senhor, seu timer finalizou. São 15:42."
+
+  ─ Cancelar ─
+  Você fala:   "Jarvis, cancela o timer"
+               "Jarvis, para o timer"
+               "Jarvis, cancela tudo"
+
+  Jarvis fala: "1 timer cancelado, senhor."
+               "Nenhum timer ativo para cancelar, senhor."
+
+  ─ Status ─
+  Você fala:   "Jarvis, tem timer ativo?"
+               "Jarvis, quantos timers?"
+               "Jarvis, timer ativo"
+
+  Jarvis fala: "Há 2 timers ativos no momento."
+               "Nenhum timer ativo no momento, senhor."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🔊 VOLUME
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Você fala:   "Jarvis, aumentar volume"
+               "Jarvis, mais alto"
+               "Jarvis, sobe o som"
+
+  Jarvis fala: "Aumentando volume, senhor."
+
+  Você fala:   "Jarvis, diminuir volume"
+               "Jarvis, mais baixo"
+               "Jarvis, tá alto demais"
+
+  Jarvis fala: "Diminuindo volume, senhor."
+
+  ─ Mudo ─
+  Você fala:   "Jarvis, silenciar"
+               "Jarvis, muta"
+               "Jarvis, sem som"
+
+  Jarvis fala: "Silenciado."
+
+  Você fala:   "Jarvis, ativa o som"
+               "Jarvis, desmuta"
+               "Jarvis, volta o som"
+
+  Jarvis fala: "Som ligado."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🎵 MÚSICA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Você fala:   "Jarvis, pausar"
+               "Jarvis, play"
+               "Jarvis, para a música"
+
+  Jarvis fala: "Pausar reprodução."  /  "Play Pause."
+
+  Você fala:   "Jarvis, próxima música"
+               "Jarvis, pula essa"
+               "Jarvis, skip"
+
+  Jarvis fala: "Próximo."  /  "Avançar."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🖥️ SISTEMA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Você fala:   "Jarvis, tela cheia"
+               "Jarvis, fullscreen"
+
+  Jarvis fala: "Tela cheia, senhor."
+
+  Você fala:   "Jarvis, atualizar página"
+               "Jarvis, recarrega"
+               "Jarvis, f5"
+
+  Jarvis fala: "Recarregando senhor."
+
+  Você fala:   "Jarvis, abre o editor"
+               "Jarvis, abre o vscode"
+               "Jarvis, quero programar"
+
+  Jarvis fala: "Iniciando editor de código."
+
+  Você fala:   "Jarvis, clica"
+               "Jarvis, seleciona"
+               "Jarvis, confirma"
+
+  Jarvis fala: "Clique confirmado."  /  "Executando."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🎤 VOZ DO JARVIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Você fala:   "Jarvis, ativa a voz"
+               "Jarvis, pode falar"
+
+  Jarvis fala: "Módulo de voz reativado."  /  "Estou ouvindo."
+
+  Você fala:   "Jarvis, silencia o jarvis"
+               "Jarvis, para de falar"
+               "Jarvis, modo silencioso"
+
+  Jarvis fala: "Módulo de voz em espera."  (última fala antes do silêncio)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🖱️ MODO MOUSE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Você fala:   "Jarvis, ativa o mouse"
+               "Jarvis, modo mouse"
+               "Jarvis, controle manual"
+
+  Jarvis fala: "Interface de mouse ativada."  /  "Modo mouse."
+
+  Você fala:   "Jarvis, desativa o mouse"
+               "Jarvis, sai do modo mouse"
+
+  Jarvis fala: "Controle manual desativado."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 👋 SAUDAÇÃO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Você fala:   "Jarvis, olá"
+               "Jarvis, bom dia"
+               "Jarvis, tudo bem?"
+
+  Jarvis fala: "Olá. Sistemas online e prontos, senhor."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ⚠️ ENCERRAR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Você fala:   "Jarvis, encerrar o sistema"
+               "Jarvis, desliga o computador"
+               "Jarvis, shutdown"
+
+  Jarvis fala: "Encerrando o sistema, senhor."
+               "Desligando tudo, até logo."
+
+  ─ Fechar só o JARVIS ─
+  Você fala:   "Jarvis, fechar jarvis"
+               "Jarvis, encerra o programa"
+               "Jarvis, sair"
+
+  Jarvis fala: "Encerrando o JARVIS. Até logo, senhor."
+
+══════════════════════════════════════════════════════════════════════
+ DICA: Se o Jarvis não responder, aguarde o bip de confirmação após
+       dizer "Jarvis" e fale o comando claramente em português.
+══════════════════════════════════════════════════════════════════════
+chave groq= sua_chave_aqui
+
+
+listen.py backup 1/3/26
