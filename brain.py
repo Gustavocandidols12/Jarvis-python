@@ -50,12 +50,23 @@ from utilities import (
 # UTILITÁRIO — detecção automática de browser instalado
 # -----------------------------------------------------------------------
 
+_BROWSER_CACHE: list | None = None  # [FIX-CACHE] Detectado uma vez, reutilizado sempre
+
+
 def _detectar_browser() -> list:
     """
     Retorna o comando do primeiro browser encontrado no sistema.
     Testa os mais comuns na ordem: Brave → Chrome → Chromium → Firefox.
     Fallback: xdg-open (abre com o browser padrão do sistema).
+
+    [FIX-CACHE] Resultado é cacheado após a primeira detecção.
+    Antes: chamava subprocess.run(["which", ...]) até 8 vezes A CADA uso de voz,
+    bloqueando a thread por ~200-400ms desnecessariamente.
     """
+    global _BROWSER_CACHE
+    if _BROWSER_CACHE is not None:
+        return _BROWSER_CACHE
+
     candidatos = [
         "brave-browser",
         "brave",
@@ -70,9 +81,12 @@ def _detectar_browser() -> list:
         resultado = subprocess.run(["which", nome], capture_output=True)
         if resultado.returncode == 0:
             print(f"[BRAIN] Browser detectado: {nome}")
-            return [nome]
+            _BROWSER_CACHE = [nome]
+            return _BROWSER_CACHE
+
     print("[BRAIN] Nenhum browser encontrado, usando xdg-open como fallback.")
-    return ["xdg-open"]
+    _BROWSER_CACHE = ["xdg-open"]
+    return _BROWSER_CACHE
 
 
 class Brain:
@@ -433,8 +447,21 @@ class Brain:
             pyautogui.press('volumedown')
             jarvis_voice.falar("Diminuindo volume, senhor")
         elif cmd == "2":
-            pyautogui.press('volumeup')
-            jarvis_voice.falar("Aumentando volume, senhor")
+            def _conectar_womic():
+                # Carrega módulo de loopback com senha via stdin (não interativo)
+                subprocess.run(
+                    ["sudo", "-S", "modprobe", "snd-aloop"],
+                    input="@Qnp09c49\n",
+                    capture_output=True,
+                    text=True
+                )
+                # Popen = roda em background, não trava o JARVIS
+                subprocess.Popen([
+                    "/home/gustavo/Downloads/micclient-x86_64.AppImage",
+                    "-t", "WIFI", "192.168.1.15"
+                ])
+            threading.Thread(target=_conectar_womic, daemon=True).start()
+            jarvis_voice.falar("Conectando ao celular, senhor.")
         elif cmd == "3":
             if not jarvis_voice.voz_ativa:
                 jarvis_voice.voz_ativa = True
@@ -458,7 +485,10 @@ class Brain:
                 cap_ref.release()
             import cv2
             cv2.destroyAllWindows()
-            sys.exit(0)
+            # [FIX-EXIT] sys.exit(0) em thread secundária (voz) apenas levanta
+            # SystemExit NESSA thread, sem matar o processo — o JARVIS ficava
+            # rodando como zumbi. os._exit(0) encerra o processo de verdade.
+            os._exit(0)
         elif cmd == "Pause":
             jarvis_voice.falar(random.choice(VozGPause))
             pyautogui.press("space")

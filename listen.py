@@ -56,6 +56,7 @@ import re
 import threading
 import time
 import unicodedata
+import subprocess
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
@@ -75,24 +76,36 @@ load_dotenv()
 WAKE_WORD_ATIVO           = True
 PORCUPINE_ACCESS_KEY      = os.getenv("PORCUPINE_ACCESS_KEY", "sua_chave_aqui")
 WAKE_WORD_KEYWORD         = "jarvis"
-WAKE_WORD_SENSIBILIDADE   = 0.7
+WAKE_WORD_SENSIBILIDADE   = 0.8
 WAKE_WORD_GANHO           = 2.0
 WAKE_WORD_CONFIRMACOES    = 1
 WAKE_WORD_COOLDOWN_SEG    = 2.0
 
 # --- GRAVAÇÃO ---
-SAMPLE_RATE               = 16000
+SAMPLE_RATE               = 16000   # rate exigido pelo Porcupine e Whisper
 CANAIS                    = 1
 BLOCKSIZE                 = 1024
 GANHO_AMPLIFICACAO        = 4.0
 DURACAO_GRAVACAO_SEG      = 7.0
-SILENCIO_RMS_THRESHOLD    = 0.002
 
-# [OPT-2] Reduzido 30 → 18: ~770ms a menos de espera no silêncio final
+# [FIX-WOMIC] O dispositivo hw:1,1 (Loopback do WoMic) só aceita 48000Hz.
+# Abrir com 16000Hz causava "Invalid sample rate [PaErrorCode -9997]".
+# Solução: gravar em 48000Hz no WoMic e resamplear para 16000Hz antes do STT.
+WOMIC_SAMPLE_RATE         = 48000
+WOMIC_DEVICE_HW           = "hw:1,1"
+WOMIC_PROCESS_NAME        = "micclient"
+
+# Threshold de silêncio separado por fonte (WoMic tem mais ruído de rede)
+SILENCIO_RMS_THRESHOLD_PC    = 0.002
+SILENCIO_RMS_THRESHOLD_WOMIC = 0.005
+
+# Ganho separado por fonte
+GANHO_WOMIC = 3.0
+GANHO_PC    = 4.0
+
+# [OPT-2] Reduzido 30 → 18
 FRAMES_SILENCIO_PARAR     = 18
-
 FRAMES_IGNORAR_INICIO     = 3
-# [FIX-2] Renomeado (sem caractere especial Ã) e agora realmente verificado
 FRACAO_FRAMES_VOZ_MINIMA  = 0.10
 
 # --- PRÉ-PROCESSAMENTO ---
@@ -106,12 +119,50 @@ WHISPER_COMPUTE_TYPE      = "int8"
 WHISPER_IDIOMA            = "pt"
 
 # --- DEDUPLICAÇÃO E DEBOUNCE ---
-# [OPT-6] Reduzido 2.0 → 1.2s
 DEBOUNCE_COMANDO_SEG      = 1.2
 SIMILARIDADE_MINIMA       = 0.30
-
-# [OPT-5] Score para early-exit na busca de intenção
 SCORE_EARLY_EXIT          = 0.85
+
+
+# -----------------------------------------------------------------------
+# AUTO-DETECÇÃO DO DISPOSITIVO DE MICROFONE (WoMic vs PC)
+# -----------------------------------------------------------------------
+
+def _womic_ativo() -> bool:
+    """Retorna True se o processo micclient estiver rodando."""
+    try:
+        return subprocess.run(
+            ["pgrep", "-f", WOMIC_PROCESS_NAME],
+            capture_output=True
+        ).returncode == 0
+    except Exception:
+        return False
+
+
+def _detectar_mic() -> tuple:
+    """
+    Retorna (device, sample_rate, ganho, threshold_silencio).
+    WoMic: hw:1,1 @ 48000Hz  |  PC: None (padrão) @ 16000Hz
+    """
+    if _womic_ativo():
+        print("[LISTEN] WoMic detectado → microfone: celular (48000Hz→16000Hz).")
+        return WOMIC_DEVICE_HW, WOMIC_SAMPLE_RATE, GANHO_WOMIC, SILENCIO_RMS_THRESHOLD_WOMIC
+    print("[LISTEN] WoMic inativo → microfone: PC.")
+    return None, SAMPLE_RATE, GANHO_PC, SILENCIO_RMS_THRESHOLD_PC
+
+
+def _resamplear(audio: np.ndarray, orig_rate: int, dest_rate: int) -> np.ndarray:
+    """
+    Resamplea audio de orig_rate para dest_rate com interpolação linear simples.
+    Usado para converter 48000Hz (WoMic) → 16000Hz (Porcupine/Whisper).
+    Não exige scipy — usa apenas numpy.
+    """
+    if orig_rate == dest_rate:
+        return audio
+    razao         = dest_rate / orig_rate
+    novo_tamanho  = int(len(audio) * razao)
+    indices_orig  = np.linspace(0, len(audio) - 1, novo_tamanho)
+    return np.interp(indices_orig, np.arange(len(audio)), audio).astype(audio.dtype)
 
 
 # -----------------------------------------------------------------------
@@ -607,38 +658,60 @@ class ListenEngine:
         if not self._porcupine:
             return True
 
-        frame_length = self._porcupine.frame_length
+        frame_length = self._porcupine.frame_length  # Porcupine exige exatamente 16000Hz
         confirmacoes = 0
+
+        # [FIX-WOMIC] Detecta fonte e sample rate nativo do dispositivo
+        mic_device, mic_rate, ganho_mic, _ = _detectar_mic()
+
+        # Quando WoMic (48000Hz), precisa ler mais samples para ter o equivalente
+        # ao frame_length em 16000Hz após o resample.
+        # Razão: 48000/16000 = 3 → lê 3x mais samples e resamplea para frame_length
+        razao_rate   = mic_rate // SAMPLE_RATE  # 3 para WoMic, 1 para PC
+        blocksize_hw = frame_length * razao_rate
 
         try:
             stream_ctx = sd.InputStream(
-                samplerate=SAMPLE_RATE, channels=CANAIS,
-                dtype='int16', blocksize=frame_length,
+                samplerate=mic_rate, channels=CANAIS,
+                dtype='int16', blocksize=blocksize_hw,
+                device=mic_device,
             )
         except Exception as e:
             print(f"[LISTEN] ERRO ao abrir stream wake word: {e}")
             time.sleep(3)
             return False
 
-        with stream_ctx as stream:
-            print(f"[LISTEN] Aguardando 'Jarvis'... "
-                  f"(sens={WAKE_WORD_SENSIBILIDADE}, ganho={WAKE_WORD_GANHO}x)")
+        fonte_label = "WoMic celular" if mic_device else "PC"
+        print(f"[LISTEN] Aguardando 'Jarvis'... "
+              f"(sens={WAKE_WORD_SENSIBILIDADE}, ganho={ganho_mic}x, "
+              f"device={fonte_label}, rate={mic_rate}Hz)")
 
+        with stream_ctx as stream:
             while self._ativo:
-                # [FIX-1] Verificação de pausa no topo — sem check redundante interno
                 if self.pausado:
                     time.sleep(0.1)
                     continue
 
                 try:
-                    pcm_data, _ = stream.read(frame_length)
+                    pcm_data, _ = stream.read(blocksize_hw)
                 except Exception as e:
                     print(f"[LISTEN] ERRO leitura microfone: {e}")
                     time.sleep(1)
                     break
 
                 pcm_float = pcm_data[:, 0].astype(np.float32)
-                pcm_float = np.clip(pcm_float * WAKE_WORD_GANHO, -32768, 32767)
+
+                # [FIX-WOMIC] Resamplea de 48000→16000Hz se necessário
+                if razao_rate != 1:
+                    pcm_float = _resamplear(pcm_float, mic_rate, SAMPLE_RATE)
+
+                pcm_float = np.clip(pcm_float * ganho_mic, -32768, 32767)
+
+                # Garante tamanho exato que o Porcupine espera
+                if len(pcm_float) < frame_length:
+                    continue
+                pcm_float = pcm_float[:frame_length]
+
                 resultado = self._porcupine.process(pcm_float.astype(np.int16).tolist())
 
                 if resultado >= 0:
@@ -654,7 +727,6 @@ class ListenEngine:
                         self._tempo_ultimo_wake = agora
                         confirmacoes = 0
                         print("[LISTEN] Wake word confirmada!")
-                        # [OPT-1] Bip em paralelo — gravação não espera bip terminar
                         threading.Thread(target=self._tocar_bip, daemon=True).start()
                         return True
                 else:
@@ -668,20 +740,22 @@ class ListenEngine:
 
     def _gravar_comando(self) -> tuple:
         """
-        Retorna (audio_array, frames_com_voz).
-        [OPT-2] Para em 18 frames de silêncio (~1.15s) em vez de 30 (~1.92s).
-        [FIX-2] Conta frames com voz para verificação posterior.
+        Retorna (audio_array_16kHz, frames_com_voz).
+        [FIX-WOMIC] Grava em 48000Hz quando WoMic ativo e resamplea para 16000Hz.
         """
         print("[LISTEN] Gravando...")
         frames_gravados  = []
         frames_silencio  = 0
         frames_com_voz   = 0
-        total_frames_max = int(SAMPLE_RATE * DURACAO_GRAVACAO_SEG)
+
+        mic_device, mic_rate, ganho_mic, threshold_silencio = _detectar_mic()
+        total_frames_max = int(mic_rate * DURACAO_GRAVACAO_SEG)
 
         try:
             stream_ctx = sd.InputStream(
-                samplerate=SAMPLE_RATE, channels=CANAIS,
+                samplerate=mic_rate, channels=CANAIS,
                 dtype='float32', blocksize=BLOCKSIZE,
+                device=mic_device,
             )
         except Exception as e:
             print(f"[LISTEN] ERRO stream gravação: {e}")
@@ -696,11 +770,12 @@ class ListenEngine:
                     print(f"[LISTEN] ERRO leitura gravação: {e}")
                     break
 
+                frame = frame * ganho_mic
                 frames_gravados.append(frame.copy())
                 total_frames += len(frame)
 
                 rms = float(np.sqrt(np.mean(frame ** 2)))
-                if rms < SILENCIO_RMS_THRESHOLD:
+                if rms < threshold_silencio:
                     frames_silencio += 1
                 else:
                     frames_silencio = 0
@@ -714,6 +789,11 @@ class ListenEngine:
             return np.array([], dtype=np.float32), 0
 
         audio = np.concatenate(frames_gravados, axis=0).flatten()
+
+        # [FIX-WOMIC] Resamplea 48000→16000Hz para o Whisper processar corretamente
+        if mic_rate != SAMPLE_RATE:
+            audio = _resamplear(audio, mic_rate, SAMPLE_RATE)
+
         return audio, frames_com_voz
 
     # -------------------------------------------------------------------

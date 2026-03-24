@@ -71,6 +71,8 @@ def main():
 
     prev_mouse_x, prev_mouse_y = pyautogui.position()
     gesto_contador = {}
+    falhas_leitura = 0        # [FIX-RETRY] contador de falhas consecutivas de câmera
+    MAX_FALHAS_CAM = 10       # tolerância antes de desistir (~0.4s @ 26fps)
     
     CORPO_X, CORPO_Y = 505, 120 
     jarvis_radius = 65
@@ -90,127 +92,146 @@ def main():
 
     while cap.isOpened():
         success, frame = cap.read()
-        if not success: break
+        if not success:
+            # [FIX-RETRY] Antes: break imediato na 1ª falha destruía o sistema
+            # por uma falha transitória de câmera (ex: USB glitch, driver lento).
+            # Agora: tolera até MAX_FALHAS_CAM consecutivas antes de encerrar.
+            falhas_leitura += 1
+            print(f"[MAIN] Falha de leitura da câmera ({falhas_leitura}/{MAX_FALHAS_CAM})")
+            if falhas_leitura >= MAX_FALHAS_CAM:
+                print("[MAIN] Câmera perdida definitivamente. Encerrando.")
+                break
+            time.sleep(0.04)
+            continue
+        falhas_leitura = 0  # reset ao recuperar
 
-        frame = cv2.flip(frame, 1)
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb_frame)
+        try:
+            frame = cv2.flip(frame, 1)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = hands.process(rgb_frame)
 
-        tempo_agora = time.time()
-        hora_atual = datetime.datetime.now().hour
-        is_noite = 19 <= hora_atual or hora_atual < 6
+            tempo_agora = time.time()
+            hora_atual = datetime.datetime.now().hour
+            is_noite = 19 <= hora_atual or hora_atual < 6
 
-        # Atualiza sistema emocional e estados baseados no tempo
-        jarvis_emotions.update(results.multi_hand_landmarks is not None)
+            # Atualiza sistema emocional e estados baseados no tempo
+            jarvis_emotions.update(results.multi_hand_landmarks is not None)
 
-        # Pausa o listener enquanto o JARVIS está falando
-        # Evita que o microfone capture a própria voz TTS e gere comandos fantasma
-        jarvis_listen.pausado = jarvis_voice.boca_falando
+            # Pausa o listener enquanto o JARVIS está falando
+            # Evita que o microfone capture a própria voz TTS e gere comandos fantasma
+            jarvis_listen.pausado = jarvis_voice.boca_falando
 
-        # ← NOVO: atualiza o frame compartilhado com o módulo de visão
-        # Chamado antes de qualquer desenho de HUD para que a imagem
-        # capturada seja limpa (sem overlays do JARVIS desenhados por cima)
-        atualizar_frame(frame)
+            # ← NOVO: atualiza o frame compartilhado com o módulo de visão
+            # Chamado antes de qualquer desenho de HUD para que a imagem
+            # capturada seja limpa (sem overlays do JARVIS desenhados por cima)
+            atualizar_frame(frame)
 
-        # Desenha o Jarvis
-        desenhar_jarvis(frame, CORPO_X, CORPO_Y, jarvis_radius, 
-                        jarvis_voice.boca_falando, jarvis_emotions.dormindo, 
-                        is_noite, modo=jarvis_emotions.modo_visual)
+            # Desenha o Jarvis
+            desenhar_jarvis(frame, CORPO_X, CORPO_Y, jarvis_radius, 
+                            jarvis_voice.boca_falando, jarvis_emotions.dormindo, 
+                            is_noite, modo=jarvis_emotions.modo_visual)
 
-        gesto_atual = None
+            gesto_atual = None
 
-        if results.multi_hand_landmarks:
-            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                
-                # --- MODO MOUSE ---
-                if jarvis_brain.gestos_bloqueados_7:
-                    target_x_raw = hand_landmarks.landmark[10].x * frame.shape[1]
-                    target_y_raw = hand_landmarks.landmark[10].y * frame.shape[0]
-                    screen_w, screen_h = pyautogui.size()
+            if results.multi_hand_landmarks:
+                for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
                     
-                    margem = 0.15
-                    x_min, x_max = margem * frame.shape[1], (1 - margem) * frame.shape[1]
-                    y_min, y_max = margem * frame.shape[0], (1 - margem) * frame.shape[0]
+                    # --- MODO MOUSE ---
+                    if jarvis_brain.gestos_bloqueados_7:
+                        target_x_raw = hand_landmarks.landmark[10].x * frame.shape[1]
+                        target_y_raw = hand_landmarks.landmark[10].y * frame.shape[0]
+                        screen_w, screen_h = pyautogui.size()
+                        
+                        margem = 0.15
+                        x_min, x_max = margem * frame.shape[1], (1 - margem) * frame.shape[1]
+                        y_min, y_max = margem * frame.shape[0], (1 - margem) * frame.shape[0]
 
-                    target_mouse_x = np.interp(target_x_raw, [x_min, x_max], [0, screen_w])
-                    target_mouse_y = np.interp(target_y_raw, [y_min, y_max], [0, screen_h])
+                        target_mouse_x = np.interp(target_x_raw, [x_min, x_max], [0, screen_w])
+                        target_mouse_y = np.interp(target_y_raw, [y_min, y_max], [0, screen_h])
 
-                    current_mouse_x = prev_mouse_x + (target_mouse_x - prev_mouse_x) * SMOOTHING_FACTOR
-                    current_mouse_y = prev_mouse_y + (target_mouse_y - prev_mouse_y) * SMOOTHING_FACTOR
+                        current_mouse_x = prev_mouse_x + (target_mouse_x - prev_mouse_x) * SMOOTHING_FACTOR
+                        current_mouse_y = prev_mouse_y + (target_mouse_y - prev_mouse_y) * SMOOTHING_FACTOR
+                        
+                        pyautogui.moveTo(int(current_mouse_x), int(current_mouse_y))
+                        prev_mouse_x, prev_mouse_y = current_mouse_x, current_mouse_y
+
+                    # Landmarks visuais
+                    draw_custom_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+                    # Detecção de Geometria da Mão
+                    is_right_hand = True
+                    if results.multi_handedness and len(results.multi_handedness) > idx:
+                        is_right_hand = results.multi_handedness[idx].classification[0].label == 'right'
+
+                    wrist_to_middle_mcp = np.array([hand_landmarks.landmark[0].x - hand_landmarks.landmark[9].x,
+                                                    hand_landmarks.landmark[0].y - hand_landmarks.landmark[9].y])
+                    palm_length = np.linalg.norm(wrist_to_middle_mcp)
+
+                    # Reconhecimento de dedos
+                    p_est = polegar_estendido_angulo(hand_landmarks.landmark)
+                    i_est = dedo_estendido(hand_landmarks.landmark, 8, 7, palm_length=palm_length)
+                    m_est = dedo_estendido(hand_landmarks.landmark, 12, 11, palm_length=palm_length)
+                    a_est = dedo_estendido(hand_landmarks.landmark, 16, 15, palm_length=palm_length)
+                    mi_est = dedo_estendido(hand_landmarks.landmark, 20, 19, palm_length=palm_length)
                     
-                    pyautogui.moveTo(int(current_mouse_x), int(current_mouse_y))
-                    prev_mouse_x, prev_mouse_y = current_mouse_x, current_mouse_y
+                    i_dob = dedo_dobrado_y(hand_landmarks.landmark, 8, 7, 6, palm_length=palm_length)
+                    m_dob = dedo_dobrado_y(hand_landmarks.landmark, 12, 11, 10, palm_length=palm_length)
+                    a_dob = dedo_dobrado_y(hand_landmarks.landmark, 16, 15, 14, palm_length=palm_length)
+                    mi_dob = dedo_dobrado_y(hand_landmarks.landmark, 20, 19, 18, palm_length=palm_length)
+                    p_dob = not p_est
 
-                # Landmarks visuais
-                draw_custom_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                    # Lógica de Mapeamento de Gestos
+                    if m_est and not i_est and not a_est and not mi_est and p_est:
+                        gesto_atual = "9" if jarvis_brain.gestos_bloqueados_7 else "Encerrar"
+                    elif i_est and mi_est and m_dob and a_dob and p_est:
+                        gesto_atual = "Rock"
+                    elif i_dob and m_dob and a_dob and mi_dob and p_dob:
+                        if (tempo_agora - jarvis_brain.last_toggle_time >= DEBOUNCE_TIME):
+                            gesto_atual = "Pause" if jarvis_brain.gestos_bloqueados_7 else "Mute"
+                    elif i_est and m_dob and a_dob and mi_dob and p_dob:
+                        gesto_atual = "1"
+                    elif i_est and m_est and a_dob and mi_dob and p_dob:
+                        gesto_atual = "8" if jarvis_brain.gestos_bloqueados_7 else "2"
+                    elif i_est and m_est and p_est and a_dob and mi_dob:
+                        gesto_atual = "clique" if jarvis_brain.gestos_bloqueados_7 else "3"
+                    elif i_est and m_est and a_est and mi_est and p_dob:
+                        gesto_atual = "Next" if jarvis_brain.gestos_bloqueados_7 else "4"
+                    elif m_est and i_est and a_est and mi_est and p_est:
+                        gesto_atual = "5"
+                    elif mi_est and i_dob and m_dob and a_dob and p_dob:
+                        gesto_atual = "6"
+                    elif i_est and p_est and m_dob and a_dob and mi_dob:
+                        gesto_atual = "7"
+                    elif p_est and i_dob and m_dob and a_dob and mi_dob:
+                        gesto_atual = "DB"
 
-                # Detecção de Geometria da Mão
-                is_right_hand = True
-                if results.multi_handedness and len(results.multi_handedness) > idx:
-                    is_right_hand = results.multi_handedness[idx].classification[0].label == 'right'
+                    # Confirmação de quadros
+                    if gesto_atual:
+                        gesto_contador[gesto_atual] = gesto_contador.get(gesto_atual, 0) + 1
+                        if gesto_contador[gesto_atual] < CONFIRMACAO_FRAMES:
+                            gesto_atual = None
+                    else:
+                        gesto_contador.clear()
 
-                wrist_to_middle_mcp = np.array([hand_landmarks.landmark[0].x - hand_landmarks.landmark[9].x,
-                                                hand_landmarks.landmark[0].y - hand_landmarks.landmark[9].y])
-                palm_length = np.linalg.norm(wrist_to_middle_mcp)
+                    # Executa no Cérebro
+                    jarvis_brain.execute(gesto_atual, cap)
 
-                # Reconhecimento de dedos
-                p_est = polegar_estendido_angulo(hand_landmarks.landmark)
-                i_est = dedo_estendido(hand_landmarks.landmark, 8, 7, palm_length=palm_length)
-                m_est = dedo_estendido(hand_landmarks.landmark, 12, 11, palm_length=palm_length)
-                a_est = dedo_estendido(hand_landmarks.landmark, 16, 15, palm_length=palm_length)
-                mi_est = dedo_estendido(hand_landmarks.landmark, 20, 19, palm_length=palm_length)
-                
-                i_dob = dedo_dobrado_y(hand_landmarks.landmark, 8, 7, 6, palm_length=palm_length)
-                m_dob = dedo_dobrado_y(hand_landmarks.landmark, 12, 11, 10, palm_length=palm_length)
-                a_dob = dedo_dobrado_y(hand_landmarks.landmark, 16, 15, 14, palm_length=palm_length)
-                mi_dob = dedo_dobrado_y(hand_landmarks.landmark, 20, 19, 18, palm_length=palm_length)
-                p_dob = not p_est
+            # HUD Info
+            cv2.putText(frame, "JARVIS SYSTEM: ONLINE", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_JARVIS_MAIN, 1)
+            if jarvis_brain.gestos_bloqueados_7:
+                cv2.putText(frame, "MODO MOUSE: ATIVADO", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-                # Lógica de Mapeamento de Gestos
-                if m_est and not i_est and not a_est and not mi_est and p_est:
-                    gesto_atual = "9" if jarvis_brain.gestos_bloqueados_7 else "Encerrar"
-                elif i_est and mi_est and m_dob and a_dob and p_est:
-                    gesto_atual = "Rock"
-                elif i_dob and m_dob and a_dob and mi_dob and p_dob:
-                    if (tempo_agora - jarvis_brain.last_toggle_time >= DEBOUNCE_TIME):
-                        gesto_atual = "Pause" if jarvis_brain.gestos_bloqueados_7 else "Mute"
-                elif i_est and m_dob and a_dob and mi_dob and p_dob:
-                    gesto_atual = "1"
-                elif i_est and m_est and a_dob and mi_dob and p_dob:
-                    gesto_atual = "8" if jarvis_brain.gestos_bloqueados_7 else "2"
-                elif i_est and m_est and p_est and a_dob and mi_dob:
-                    gesto_atual = "clique" if jarvis_brain.gestos_bloqueados_7 else "3"
-                elif i_est and m_est and a_est and mi_est and p_dob:
-                    gesto_atual = "Next" if jarvis_brain.gestos_bloqueados_7 else "4"
-                elif m_est and i_est and a_est and mi_est and p_est:
-                    gesto_atual = "5"
-                elif mi_est and i_dob and m_dob and a_dob and p_dob:
-                    gesto_atual = "6"
-                elif i_est and p_est and m_dob and a_dob and mi_dob:
-                    gesto_atual = "7"
-                elif p_est and i_dob and m_dob and a_dob and mi_dob:
-                    gesto_atual = "DB"
+            # Painel de comandos semitransparente no canto inferior esquerdo
+            desenhar_painel_comandos(frame)
+            
+            cv2.imshow('JARVIS Interface', frame)
 
-                # Confirmação de quadros
-                if gesto_atual:
-                    gesto_contador[gesto_atual] = gesto_contador.get(gesto_atual, 0) + 1
-                    if gesto_contador[gesto_atual] < CONFIRMACAO_FRAMES:
-                        gesto_atual = None
-                else:
-                    gesto_contador.clear()
+        except Exception as e:
+            # [FIX-LOOP] Proteção geral: qualquer exceção não tratada no loop de vídeo
+            # (ex: landmarks inválidos, pyautogui fora da tela, erro de desenho)
+            # agora é logada e o loop continua em vez de crashar o processo inteiro.
+            print(f"[MAIN] ERRO no loop de vídeo (frame ignorado): {type(e).__name__}: {e}")
 
-                # Executa no Cérebro
-                jarvis_brain.execute(gesto_atual, cap)
-
-        # HUD Info
-        cv2.putText(frame, "JARVIS SYSTEM: ONLINE", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_JARVIS_MAIN, 1)
-        if jarvis_brain.gestos_bloqueados_7:
-            cv2.putText(frame, "MODO MOUSE: ATIVADO", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-        # Painel de comandos semitransparente no canto inferior esquerdo
-        desenhar_painel_comandos(frame)
-        
-        cv2.imshow('JARVIS Interface', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'): break
 
     # Encerramento limpo

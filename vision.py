@@ -19,6 +19,7 @@ API USADA:
 """
 
 import os
+import re
 import cv2
 import base64
 import datetime
@@ -185,7 +186,6 @@ def analisar_frame(pergunta: str = "") -> str:
 
 def _limpar_para_tts(texto: str) -> str:
     """Remove markdown e formatação que o pyttsx3 leria literalmente."""
-    import re
     texto = re.sub(r"\*{1,3}(.*?)\*{1,3}", r"\1", texto)
     texto = re.sub(r"#{1,6}\s*", "", texto)
     texto = re.sub(r"`{1,3}.*?`{1,3}", "", texto, flags=re.DOTALL)
