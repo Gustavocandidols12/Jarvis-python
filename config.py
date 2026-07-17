@@ -205,7 +205,7 @@ GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "sua_chave_aqui")
 PORCUPINE_ACCESS_KEY = os.getenv("PORCUPINE_ACCESS_KEY", "sua_chave_aqui")
 GROQ_MODELO      = "llama-3.1-8b-instant"  # mais rápido (560 t/s) — ideal para TTS em tempo real
 GROQ_MAX_TOKENS  = 200                      # limita resposta para o TTS não demorar
-GROQ_TEMPERATURA = 0.7                      # 0=determinístico, 1=criativo
+GROQ_TEMPERATURA = 0.8                      # 0=determinístico, 1=criativo
 
 # Frases de espera enquanto a IA processa (faladas antes da resposta chegar)
 VozIAPesquisando = [

@@ -254,7 +254,8 @@ def resumir_periodo(texto_consulta: str) -> str:
     prompt = (
         f"Abaixo estão os registros de conversa do JARVIS em {data_fmt}.\n"
         f"Faça um resumo conciso do que foi conversado, destacando os principais assuntos.\n"
-        f"Fale como o JARVIS falaria: direto, sem markdown, sem bullets, no máximo 5 frases com de toque de bom humor.\n"
+        f"tenha senso de humor assim como o jarvis e o TARS de interstellar\n"
+        f"Fale como o JARVIS falaria: direto, sem markdown, sem bullets, no máximo 7 frases com de toque de bom humor.\n"
         f"Se houver poucos registros, mencione brevemente o que houve.\n\n"
         f"REGISTROS:\n{historico}"
     )

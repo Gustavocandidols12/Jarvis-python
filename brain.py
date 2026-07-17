@@ -29,11 +29,15 @@ import threading
 import subprocess
 import urllib.parse
 import pyautogui
+import glob
 from config import *
 from voice import jarvis_voice
-from vision import analisar_frame
+from vision import analisar_frame, PASTA_FRAMES
 import memory as _memory
 import notes as _notes
+import recording as _recording  # [NOVO] módulo de gravação de câmera
+import file_manager as _file_manager  # [NOVO] módulo de busca/abertura de arquivos
+import personality as _personality  # [NOVO] sistema de personalidade/respostas via Groq
 from utilities import (
     obter_clima,
     obter_previsao_hoje,
@@ -44,6 +48,67 @@ from utilities import (
     extrair_nome_timer,
     perguntar_ia,
 )
+
+
+# -----------------------------------------------------------------------
+# [NOVO — FASE 2] HELPER MODULAR PARA RESPOSTAS HUMANIZADAS
+# -----------------------------------------------------------------------
+# Esta função simplifica TODAS as integrações de personality em brain.py.
+# Uso: resposta = _resposta_jarvis("clima", {"local": "Brasília"})
+# 
+# BENEFÍCIOS:
+# - Código mais limpo (1 linha vs 5-6 linhas)
+# - Fallback automático se personality não disponível
+# - Fácil auditar todas as respostas (busca por _resposta_jarvis)
+# - Modular: adicione contextos sem mexer na lógica
+
+def _resposta_jarvis(categoria: str, contexto: dict = None) -> str:
+    """
+    Helper modular para integração clean de personality em toda brain.py.
+    
+    Se personality disponível: gera resposta via Groq + cache
+    Se personality não disponível: retorna fallback simples
+    
+    Args:
+        categoria: "clima", "timer", "notas", "erro", "generico", etc
+        contexto: dict com dados específicos {"local": "Brasília", "acao": "consultar"}
+    
+    Returns:
+        String pronta para falar
+    
+    Exemplos de uso:
+        resposta = _resposta_jarvis("clima", {"acao": "consultar", "local": "Brasília"})
+        resposta = _resposta_jarvis("timer", {"acao": "criar", "tempo": "5 minutos"})
+        resposta = _resposta_jarvis("notas", {"acao": "criar", "conteudo": "reunião 15:00"})
+    
+    Este helper PADRONIZA como todas as integrações conversam com personality.
+    É a ponte entre brain.py e personality.py — mantém tudo modular e limpo.
+    """
+    if contexto is None:
+        contexto = {}
+    
+    # Tenta usar personality (com fallback automático)
+    if _personality:
+        try:
+            return _personality.gerar_resposta(categoria, contexto)
+        except Exception as e:
+            print(f"[BRAIN] Erro ao gerar resposta personality ({categoria}): {e}")
+            # Continua com fallback abaixo se personality falhar
+    
+    # ─── FALLBACKS — Respostas simples se personality não disponível ───
+    # Para cada categoria, uma resposta funcional básica
+    # Essas são o "plano B" se Groq não estiver disponível
+    
+    fallbacks = {
+        "clima": "Consultando o clima, um momento.",
+        "timer": "Operação de timer executada.",
+        "notas": "Nota registrada.",
+        "memoria": "Consultando a memória.",
+        "erro": "Algo deu errado.",
+        "generico": "Prontinho, senhor.",
+    }
+    
+    return fallbacks.get(categoria, "Prontinho, senhor.")
 
 
 # -----------------------------------------------------------------------
@@ -88,7 +153,31 @@ def _detectar_browser() -> list:
     _BROWSER_CACHE = ["xdg-open"]
     return _BROWSER_CACHE
 
+    
 
+def _abrir_ultima_foto() -> None:
+    """
+    Abre a última imagem salva em PASTA_FRAMES (~/Jarvis_frames), ou seja,
+    a foto mais recente tirada pelo capturar_e_salvar() em vision.py.
+    Usa mtime para achar a mais nova, já que os nomes têm timestamp mas
+    comparar por data de modificação é mais robusto.
+    """
+    try:
+        if not os.path.isdir(PASTA_FRAMES):
+            print(f"[BRAIN] Pasta não encontrada: {PASTA_FRAMES}")
+            return
+
+        arquivos = glob.glob(os.path.join(PASTA_FRAMES, "*.jpg"))
+        if not arquivos:
+            print("[BRAIN] Nenhuma foto encontrada em Jarvis_frames.")
+            return
+
+        ultima_foto = max(arquivos, key=os.path.getmtime)
+        print(f"[BRAIN] Abrindo última foto: {ultima_foto}")
+        subprocess.Popen(["xdg-open", ultima_foto])
+    except Exception as e:
+        print(f"[BRAIN] Erro ao abrir última foto: {e}")
+        
 class Brain:
     def __init__(self):
         self.gestos_start_bloqueados = True
@@ -174,6 +263,7 @@ class Brain:
             "abrir_navegador":    "_voz_abrir_programa",
             "pesquisar":          "_voz_pesquisar",
             "ver":                "_voz_ver",
+            "foto":               "_voz_foto",
             "identificar_objeto": "_voz_identificar_objeto",
             "youtube":            "_voz_youtube",
             "memoria":            "_voz_memoria",
@@ -181,6 +271,13 @@ class Brain:
             "nota_lembrar":       "_voz_nota_lembrar",
             "nota_listar":        "_voz_nota_listar",
             "nota_apagar":        "_voz_nota_apagar",
+            # [NOVO] gravação de câmera
+            "gravacao_iniciar":   "_voz_gravacao_iniciar",
+            "gravacao_cancelar":  "_voz_gravacao_cancelar",
+            # [NOVO] busca e abertura de arquivos
+            "file_find":          "_voz_file_find",
+            "file_open":          "_voz_file_open",
+            "file_list":          "_voz_file_list",
         }
 
         cmd = MAPA_INTENCAO_COMANDO.get(intencao)
@@ -200,14 +297,25 @@ class Brain:
         # SAUDAÇÃO
         # ---------------------------------------------------------------
         if cmd == "_voz_saudacao":
-            jarvis_voice.falar("Olá. Sistemas online e prontos, senhor.")
+            # [NOVO] Saudação criativa via personality em vez de hardcoded
+            if _personality:
+                resposta = _personality.gerar_resposta(
+                    categoria="saudacao",
+                    contexto={}
+                )
+            else:
+                resposta = "Olá. Sistemas online e prontos, senhor."
+            jarvis_voice.falar(resposta)
             return
 
         # ---------------------------------------------------------------
         # CLIMA AGORA (thread para não bloquear vídeo) [FIX-8]
         # ---------------------------------------------------------------
+        # [FASE 2] Resposta criativa via helper _resposta_jarvis
         if cmd == "_voz_clima_agora":
-            jarvis_voice.falar("Consultando clima, um momento.")
+            resposta_acao = _resposta_jarvis("clima", {"acao": "consultar"})
+            jarvis_voice.falar(resposta_acao)
+            
             def _buscar():
                 jarvis_voice.falar(obter_clima())
             threading.Thread(target=_buscar, daemon=True).start()
@@ -216,8 +324,11 @@ class Brain:
         # ---------------------------------------------------------------
         # PREVISÃO DO DIA (thread) [FIX-8]
         # ---------------------------------------------------------------
+        # [FASE 2] Resposta criativa via helper _resposta_jarvis
         if cmd == "_voz_clima_hoje":
-            jarvis_voice.falar("Verificando previsão do dia.")
+            resposta_acao = _resposta_jarvis("clima", {"acao": "consultar_previsao"})
+            jarvis_voice.falar(resposta_acao)
+            
             def _buscar():
                 jarvis_voice.falar(obter_previsao_hoje())
             threading.Thread(target=_buscar, daemon=True).start()
@@ -255,7 +366,7 @@ class Brain:
         # ABRIR NAVEGADOR — detecta automaticamente qual está instalado
         # ---------------------------------------------------------------
         if cmd == "_voz_abrir_programa":
-            jarvis_voice.falar("Abrindo o seu navegador, senhor.")
+            jarvis_voice.falar(_resposta_jarvis("acao_andamento", {"acao": "abrir navegador"}))
             subprocess.Popen(_detectar_browser())
             return
 
@@ -285,6 +396,53 @@ class Brain:
         # ---------------------------------------------------------------
         if cmd == "_voz_nota_apagar":
             jarvis_voice.falar(_notes.apagar_nota(texto_bruto))
+            return
+
+        # ---------------------------------------------------------------
+        # GRAVAÇÃO DE CÂMERA — INICIAR
+        # [NOVO] _recording.iniciar_gravacao() já roda em thread própria
+        # (definida dentro de recording.py), então não precisa de
+        # threading.Thread aqui — chamada direta não bloqueia o loop de vídeo.
+        # ---------------------------------------------------------------
+        if cmd == "_voz_gravacao_iniciar":
+            jarvis_voice.falar(_recording.iniciar_gravacao())
+            return
+
+        # ---------------------------------------------------------------
+        # GRAVAÇÃO DE CÂMERA — CANCELAR
+        # ---------------------------------------------------------------
+        if cmd == "_voz_gravacao_cancelar":
+            jarvis_voice.falar(_recording.cancelar_gravacao())
+            return
+
+        # ---------------------------------------------------------------
+        # BUSCA DE ARQUIVO — LOCALIZAR
+        # [NOVO] _file_manager.buscar_arquivo() roda localmente (não bloqueante)
+        # pois faz busca em thread principal, mas é rápida pra maioria dos arquivos.
+        # Se a busca ficar lenta, pode mover pra threading.Thread depois.
+        # ---------------------------------------------------------------
+        if cmd == "_voz_file_find":
+            jarvis_voice.falar(_file_manager.buscar_arquivo(texto_bruto))
+            return
+
+        # ---------------------------------------------------------------
+        # ABERTURA DE ARQUIVO
+        # [NOVO] _file_manager.abrir_arquivo() localiza e abre o arquivo
+        # com a aplicação apropriada (.exe via wine, .sh via bash, etc.)
+        # ---------------------------------------------------------------
+        if cmd == "_voz_file_open":
+            jarvis_voice.falar(_file_manager.abrir_arquivo(texto_bruto))
+            return
+
+        # ---------------------------------------------------------------
+        # LISTAGEM DE ARQUIVOS DA PASTA
+        # [NOVO] _file_manager.listar_arquivos_pasta() lista arquivos de
+        # uma pasta, categoriza, resume via Groq e oferece arquivo com
+        # lista completa se houver muitos. Resolve o problema de JARVIS
+        # ficar 30+ segundos falando lista gigante de arquivos.
+        # ---------------------------------------------------------------
+        if cmd == "_voz_file_list":
+            jarvis_voice.falar(_file_manager.listar_arquivos_pasta(texto_bruto))
             return
 
         # ---------------------------------------------------------------
@@ -323,12 +481,29 @@ class Brain:
             termo = re.sub(r"^[\s,.\-:]+|[\s,.\-:]+$", "", termo).strip()
 
             if not termo:
-                jarvis_voice.falar("O que quer que eu procure no YouTube, senhor?")
+                # [NOVO] Pergunta criativa via personality
+                if _personality:
+                    resposta = _personality.gerar_resposta(
+                        categoria="aguardando",
+                        contexto={"tipo": "termo para procurar no YouTube"}
+                    )
+                else:
+                    resposta = "O que quer que eu procure no YouTube, senhor?"
+                jarvis_voice.falar(resposta)
                 return
 
             url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(termo)}"
             print(f"[BRAIN] YouTube → '{termo}'")
-            jarvis_voice.falar(f"Procurando {termo} no YouTube, senhor.")
+            
+            # [NOVO] Resposta criativa ao procurar no YouTube
+            if _personality:
+                resposta = _personality.gerar_resposta(
+                    categoria="acao_andamento",
+                    contexto={"acao": "procurar_youtube", "termo": termo}
+                )
+            else:
+                resposta = f"Procurando {termo} no YouTube, senhor."
+            jarvis_voice.falar(resposta)
             subprocess.Popen(_detectar_browser() + [url])
             return
 
@@ -365,6 +540,38 @@ class Brain:
                 jarvis_voice.falar(analisar_frame(pergunta))
             threading.Thread(target=_executar, daemon=True).start()
             return
+        # ---------------------------------------------------------------
+        # FOTO — "tira uma foto" → avisa de forma descontraída (sem falar
+        # em análise) e dá uma opinião sincera sobre a roupa/visual.
+        # [NOVO] Reaproveita analisar_frame() (visão via Groq), só muda o
+        # prompt para focar em estilo/roupa em vez de descrever a cena.
+        # ---------------------------------------------------------------
+        
+        if cmd == "_voz_foto":
+            jarvis_voice.falar(random.choice([
+                "Sorria, vou tirar uma foto sua.",
+                "Deixa eu registrar esse momento, um segundo.",
+                "Foto na conta de três... na verdade já tirei.",
+                "Vou bater uma foto rapidinho, senhor.",
+                "Diz xis, tirando a foto agora.",
+            ]))
+
+            _PROMPT_FOTO = (
+                "Olhe para esta imagem e analise a roupa e o visual da pessoa "
+                "que aparece. Dê uma opinião sincera e direta sobre o estilo, "
+                "pode ser elogio ou crítica, sem papas na língua, como um amigo "
+                "bem-humorado falaria. Se fizer sentido sugira uma melhoria, "
+                "mas não é obrigatório. Ignore o cenário ao fundo. Responda em "
+                "no máximo 3 frases em português, sem mencionar que está "
+                "analisando uma imagem ou fazendo qualquer tipo de análise — "
+                "fale como se estivesse simplesmente comentando o look."
+            )
+
+            def _executar():
+                jarvis_voice.falar(analisar_frame(_PROMPT_FOTO))
+                _abrir_ultima_foto()
+            threading.Thread(target=_executar, daemon=True).start()
+            return
 
         # ---------------------------------------------------------------
         # VISÃO — IDENTIFICAR OBJETO
@@ -374,7 +581,7 @@ class Brain:
                 "Olhe para esta imagem e identifique o objeto principal que aparece, "
                 "especialmente qualquer coisa que esteja sendo segurada ou em destaque. "
                 "Diga o nome, para que serve e uma característica relevante. "
-                "Ignore o cenário ao fundo. Responda em no máximo 2 frases em português."
+                "Ignore o cenário ao fundo. Responda em no máximo 3 frases em português."
             )
             jarvis_voice.falar(random.choice([
                 "Identificando o objeto, um momento.",
@@ -436,12 +643,18 @@ class Brain:
             jarvis_voice.falar_sincronizado(random.choice(VozEncerrar))
             os.system("poweroff")
         elif cmd == "Rock":
-            jarvis_voice.falar("Iniciando editor de código")
+            # [ALTERADO] Antes: "Iniciando editor de código" (fixo)
+            # Agora: resposta criativa via personality sobre abrir editor
+            resposta_acao = _personality.gerar_resposta_jarvis(
+                categoria="acao_andamento",
+                contexto={"acao": "abrir_editor_codigo"}
+            )
+            jarvis_voice.falar(resposta_acao)
             os.system("code")
         elif cmd == "Mute":
             os.system("pactl set-sink-mute @DEFAULT_SINK@ toggle")
             self.mute_ativo = not self.mute_ativo
-            jarvis_voice.falar("Silenciado" if self.mute_ativo else "Som ligado")
+            jarvis_voice.falar(_resposta_jarvis("status", {"info": "som " + ("silenciado" if self.mute_ativo else "ligado")}))
             self.last_toggle_time = time.time()
         elif cmd == "1":
             pyautogui.press('volumedown')

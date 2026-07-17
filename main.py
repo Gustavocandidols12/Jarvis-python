@@ -18,6 +18,7 @@ from emotions import jarvis_emotions
 from brain import jarvis_brain
 from listen import jarvis_listen
 from vision import atualizar_frame        # ← NOVO: módulo de visão
+from recording import atualizar_frame as atualizar_frame_gravacao  # [NOVO] módulo de gravação
 
 # --- SETUP MEDIAPIPE ---
 mp_hands = mp.solutions.hands
@@ -67,7 +68,7 @@ def main():
         return
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cap.set(cv2.CAP_PROP_FPS, 26)
+    cap.set(cv2.CAP_PROP_FPS, 20)
 
     prev_mouse_x, prev_mouse_y = pyautogui.position()
     gesto_contador = {}
@@ -125,6 +126,10 @@ def main():
             # Chamado antes de qualquer desenho de HUD para que a imagem
             # capturada seja limpa (sem overlays do JARVIS desenhados por cima)
             atualizar_frame(frame)
+
+            # [NOVO] atualiza o frame compartilhado com o módulo de gravação
+            # Mesmo motivo do acima: precisa do frame limpo, sem overlays do HUD
+            atualizar_frame_gravacao(frame)
 
             # Desenha o Jarvis
             desenhar_jarvis(frame, CORPO_X, CORPO_Y, jarvis_radius, 

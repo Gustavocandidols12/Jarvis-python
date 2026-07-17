@@ -76,7 +76,7 @@ load_dotenv()
 WAKE_WORD_ATIVO           = True
 PORCUPINE_ACCESS_KEY      = os.getenv("PORCUPINE_ACCESS_KEY", "sua_chave_aqui")
 WAKE_WORD_KEYWORD         = "jarvis"
-WAKE_WORD_SENSIBILIDADE   = 0.8
+WAKE_WORD_SENSIBILIDADE   = 0.7
 WAKE_WORD_GANHO           = 2.0
 WAKE_WORD_CONFIRMACOES    = 1
 WAKE_WORD_COOLDOWN_SEG    = 2.0
@@ -86,7 +86,7 @@ SAMPLE_RATE               = 16000   # rate exigido pelo Porcupine e Whisper
 CANAIS                    = 1
 BLOCKSIZE                 = 1024
 GANHO_AMPLIFICACAO        = 4.0
-DURACAO_GRAVACAO_SEG      = 7.0
+DURACAO_GRAVACAO_SEG      = 5.0
 
 # [FIX-WOMIC] O dispositivo hw:1,1 (Loopback do WoMic) só aceita 48000Hz.
 # Abrir com 16000Hz causava "Invalid sample rate [PaErrorCode -9997]".
@@ -120,7 +120,7 @@ WHISPER_IDIOMA            = "pt"
 
 # --- DEDUPLICAÇÃO E DEBOUNCE ---
 DEBOUNCE_COMANDO_SEG      = 1.2
-SIMILARIDADE_MINIMA       = 0.30
+SIMILARIDADE_MINIMA       = 0.40
 SCORE_EARLY_EXIT          = 0.85
 
 
@@ -401,7 +401,6 @@ INTENCOES = {
         "pergunta pra internet", "consulta aí",
     ],
 
-    # [FIX-4] Corrigido de "Abrir_navegador" para "abrir_navegador"
     "abrir_navegador": [
         "abrir navegador", "navegador",
         "abrir brave", "brave", "brave browser",
@@ -455,6 +454,12 @@ INTENCOES = {
         "usa tua câmera", "olha pra câmera",
     ],
 
+    "foto": [
+        "tirar foto", "foto", "tira uma foto",
+        "bate uma foto", "me tira uma foto", "registra uma foto",
+        "tira um print de mim", "captura minha imagem", "me fotografa",
+    ],
+
     "identificar_objeto": [
         "o que é isso", "o que é esse", "o que é essa", "o que é aquilo",
         "que objeto é esse", "que objeto é esse aqui", "que coisa é essa",
@@ -468,6 +473,56 @@ INTENCOES = {
         "sabe o que é isso", "reconhece isso",
         "que bagulho é esse", "que trem é esse", "o que raios é isso",
         "me explica o que é isso", "fala o que é esse negócio",
+    ],
+
+    "gravacao_iniciar": [
+        "iniciar gravação", "iniciar gravacao", "começar gravação", "comecar gravacao",
+        "começa a gravar", "comeca a gravar", "inicia a gravação", "inicia a gravacao",
+        "grava isso aí", "grava isso ai", "grava aí", "grava ai",
+        "começa a gravação", "comeca a gravacao", "quero gravar",
+        "gravar vídeo", "gravar video", "ativa a gravação", "ativa a gravacao",
+        "liga a câmera para gravar", "liga a camera para gravar",
+        "inicia gravação de vídeo", "inicia gravacao de video",
+        "começa a filmar", "comeca a filmar", "quero filmar",
+        "filma isso aí", "filma isso ai",
+    ],
+
+    "gravacao_cancelar": [
+        "para a gravação", "para a gravacao", "parar gravação", "parar gravacao",
+        "cancela a gravação", "cancela a gravacao", "cancelar gravação", "cancelar gravacao",
+        "encerra a gravação", "encerra a gravacao", "encerrar gravação", "encerrar gravacao",
+        "para de gravar", "pare de gravar", "termina a gravação", "termina a gravacao",
+        "finaliza a gravação", "finaliza a gravacao", "para de filmar",
+        "encerra a filmagem", "cancela a filmagem",
+    ],
+
+    # busca e abertura de arquivos — usadas por file_manager.py via brain.py
+    "file_find": [
+        "onde está", "onde esta", "localiza", "localizar", "acha",
+        "onde fica", "procura", "procura o arquivo", "me acha",
+        "me encontra", "encontra o arquivo", "consegue achar",
+        "sabe onde está", "sabe onde esta", "acha para mim",
+        "qual é o caminho", "qual e o caminho", "qual a localização", "qual a localizacao",
+        "onde se encontra", "acha aí", "acha ai",
+    ],
+
+    "file_open": [
+        "abrir", "abre", "abre o arquivo", "abra o arquivo",
+        "abrir arquivo", "abre para mim", "abre aí", "abre ai",
+        "ativa", "ativa o arquivo", "execute", "executa",
+        "executa o arquivo", "roda o arquivo", "rode esse arquivo",
+        "abre para eu ver", "abre para eu visualizar",
+        "abra para mim", "consegue abrir", "me abre",
+    ],
+
+    "file_list": [
+        "quais arquivos tem", "quais arquivos temos", "o que tem na pasta",
+        "o que tá na pasta", "o que ta na pasta", "lista de arquivos",
+        "lista os arquivos", "me mostra os arquivos", "me lista os arquivos",
+        "quais são os arquivos", "quais sao os arquivos", "me fala os arquivos",
+        "quais arquivos estão", "quais arquivos estao", "o que tem lá",
+        "o que tem aqui", "quantos arquivos tem", "quantos arquivos temos",
+        "me fala o que tem", "mostra os arquivos", "quais arquivos existem",
     ],
 
     "nota_criar": [
@@ -938,11 +993,17 @@ class ListenEngine:
     def _disparar_callbacks(self, intencao: str, texto_bruto: str):
         print(f"[LISTEN] ► '{intencao}' | '{texto_bruto}'")
 
+        # [FIX-12] Bloco original importava um objeto "jarvis_memory" que não
+        # existe em memory.py (o módulo só expõe funções soltas, ex: registrar()).
+        # Resultado: ImportError engolido pelo except, e a fala do USUÁRIO nunca
+        # era registrada na memória — só as falas do JARVIS (via voice.py).
+        # Corrigido para usar a função real do módulo, com o mesmo padrão de
+        # import já usado em brain.py ("import memory as _memory").
         try:
-            from memory import jarvis_memory
-            jarvis_memory.registrar_usuario(intencao, texto_bruto)
-        except Exception:
-            pass
+            import memory as _memory
+            _memory.registrar(texto_bruto, tipo="usuario")
+        except Exception as e:
+            print(f"[LISTEN] ERRO ao registrar fala do usuário na memória: {e}")
 
         for fn in self._callbacks:
             try:

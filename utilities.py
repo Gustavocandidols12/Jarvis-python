@@ -31,6 +31,11 @@ from groq import Groq
 from voice import jarvis_voice
 
 try:
+    import personality as _personality_util
+except ImportError:
+    _personality_util = None
+
+try:
     from config import (
         GROQ_API_KEY,
         GROQ_MODELO,
@@ -210,7 +215,7 @@ def criar_timer(segundos: int, nome: str = "") -> str:
     global _timer_id_contador
 
     if segundos <= 0:
-        return "A duração do timer precisa ser maior que zero, senhor."
+        return "Timer deve ser > 0 segundos, senhor."
 
     with _lock_timers:
         _timer_id_contador += 1
@@ -242,7 +247,7 @@ def cancelar_timers() -> str:
         _timers_ativos.clear()
 
     if quantidade == 0:
-        return "Nenhum timer ativo para cancelar, senhor."
+        return "Nenhum timer ativo, senhor."
     s = "s" if quantidade > 1 else ""
     return f"{quantidade} timer{s} cancelado{s}, senhor."
 
@@ -252,7 +257,7 @@ def status_timers() -> str:
         quantidade = len(_timers_ativos)
 
     if quantidade == 0:
-        return "Nenhum timer ativo no momento, senhor."
+        return "Nenhum timer no momento, senhor."
     s = "s" if quantidade > 1 else ""
     return f"Há {quantidade} timer{s} ativo{s} no momento."
 

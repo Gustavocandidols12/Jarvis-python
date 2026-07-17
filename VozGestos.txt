@@ -1,0 +1,398 @@
+╔══════════════════════════════════════════════════════════════════════╗
+║           JARVIS — LISTA COMPLETA DE VOZ & GESTOS                  ║
+║           Tudo que o JARVIS faz até agora (Julho 2026)             ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+Gerado automaticamente a partir do código-fonte do projeto.
+Módulos analisados: listen.py, brain.py, main.py, gestures.py,
+config.py, voice.py, vision.py, recording.py, utilities.py,
+file_manager.py, notes.py, memory.py, personality.py
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PARTE 1 — COMANDOS DE VOZ (listen.py → brain.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Pipeline: Wake Word "Jarvis" (Porcupine) → Gravação (sounddevice)
+         → STT (Whisper) → Interpretação de intenção → Ação (brain.py)
+
+─────────────────────────────────────────────────────────
+ 1. CONTROLE DE ÁUDIO / MÍDIA
+─────────────────────────────────────────────────────────
+
+[volume_up]        — Aumentar volume do sistema
+  Exemplos: "aumentar volume", "mais alto", "sobe o som"
+  Ação: pyautogui.press('volumeup') (via gesto "2")
+
+[volume_down]      — Diminuir volume do sistema
+  Exemplos: "diminuir volume", "mais baixo", "baixa o som"
+  Ação: pyautogui.press('volumedown') (via gesto "1")
+
+[mute]             — Silenciar som do sistema (toggle)
+  Exemplos: "silenciar", "mudo", "sem som", "corta o som"
+  Ação: pactl set-sink-mute @DEFAULT_SINK@ toggle
+
+[unmute]           — Reativar som do sistema (toggle)
+  Exemplos: "ligar som", "ativa o som", "desfaz mudo"
+  Ação: pactl set-sink-mute @DEFAULT_SINK@ toggle
+
+[play_pause]       — Pausar/retomar reprodução de mídia
+  Exemplos: "pausar", "play", "pause", "continuar música"
+  Ação: pyautogui.press("space")
+
+[proximo]          — Próxima faixa/música
+  Exemplos: "próxima", "pular", "skip", "próxima música"
+  Ação: pyautogui.hotkey("shift", "n")
+
+─────────────────────────────────────────────────────────
+ 2. CONTROLE DE APLICATIVOS / SISTEMA
+─────────────────────────────────────────────────────────
+
+[abrir_editor]     — Abrir VS Code (editor de código)
+  Exemplos: "abre o editor", "abrir vscode", "quero programar"
+  Ação: os.system("code")
+
+[abrir_navegador]  — Abrir navegador web (auto-detecta: Brave/Chrome/Firefox)
+  Exemplos: "abrir navegador", "abrir brave"
+  Ação: subprocess.Popen([browser_detectado])
+
+[tela_cheia]       — Ativar tela cheia (fullscreen)
+  Exemplos: "tela cheia", "fullscreen", "maximizar tela"
+  Ação: pyautogui.press("f")
+
+[recarregar]       — Recarregar página (F5)
+  Exemplos: "recarregar", "refresh", "f5", "atualiza"
+  Ação: pyautogui.press("f5")
+
+[clique]           — Clicar na posição atual do mouse
+  Exemplos: "clica", "clique", "seleciona", "confirma"
+  Ação: pyautogui.click()
+
+[encerrar]         — Desligar o computador (poweroff)
+  Exemplos: "desligar", "encerrar", "shutdown"
+  Ação: os.system("poweroff")
+
+[sair_jarvis]      — Fechar o programa JARVIS
+  Exemplos: "fechar jarvis", "sai do jarvis", "sair"
+  Ação: os._exit(0) (encerra processo)
+
+─────────────────────────────────────────────────────────
+ 3. CONTROLE DO JARVIS
+─────────────────────────────────────────────────────────
+
+[voz_ligar]        — Reativar voz do JARVIS (TTS)
+  Exemplos: "ativa a voz", "fala de novo", "liga a voz"
+  Ação: jarvis_voice.voz_ativa = True
+
+[voz_desligar]     — Silenciar voz do JARVIS (modo texto)
+  Exemplos: "silencia o jarvis", "para de falar", "modo silencioso"
+  Ação: jarvis_voice.voz_ativa = False
+
+[mouse_ligar]      — Ativar controle de mouse por gesto (mão)
+  Exemplos: "ativa o mouse", "modo mouse", "modo sete"
+  Ação: gestos_bloqueados_7 = True (ativa rastreamento de mão)
+
+[mouse_desligar]   — Desativar controle de mouse por gesto
+  Exemplos: "desativa o mouse", "sai do modo mouse", "sair modo sete"
+  Ação: gestos_bloqueados_7 = False
+
+─────────────────────────────────────────────────────────
+ 4. INFORMAÇÕES & UTILIDADES
+─────────────────────────────────────────────────────────
+
+[hora]             — Informar hora atual
+  Exemplos: "que horas são", "hora atual", "me diz a hora"
+  Ação: fala datetime.now().strftime("%H:%M")
+
+[saudacao]         — Saudação / cumprimento
+  Exemplos: "oi jarvis", "bom dia", "boa noite", "como vai"
+  Ação: resposta criativa via personality.py (Groq)
+
+[clima_agora]      — Consultar clima atual
+  Exemplos: "como está o clima", "temperatura agora", "tá chovendo"
+  Ação: API Open-Meteo → temperatura, umidade, vento, condição
+
+[clima_hoje]       — Previsão do tempo do dia
+  Exemplos: "previsão do tempo", "vai chover hoje", "levo guarda-chuva"
+  Ação: API Open-Meteo → máxima, mínima, precipitação
+
+─────────────────────────────────────────────────────────
+ 5. TIMER / ALARME
+─────────────────────────────────────────────────────────
+
+[timer_criar]      — Criar um timer / contagem regressiva
+  Exemplos: "timer de 5 minutos", "me avisa em 10 minutos", "alarme em 30 segundos"
+  Ação: threading.Timer → avisa quando termina (suporta horas/minutos/segundos e nomes)
+
+[timer_cancelar]   — Cancelar todos os timers ativos
+  Exemplos: "cancela o timer", "para o timer", "cancela tudo"
+  Ação: cancela todos os threading.Timer ativos
+
+[timer_status]     — Verificar timers ativos
+  Exemplos: "tem timer ativo", "quantos timers", "status do timer"
+  Ação: informa quantidade de timers rodando
+
+─────────────────────────────────────────────────────────
+ 6. PESQUISA / IA (Groq LLM)
+─────────────────────────────────────────────────────────
+
+[pesquisar]        — Pesquisa / pergunta para IA
+  Exemplos: "o que é", "quem é", "me explica", "pesquisa sobre", "como funciona"
+  Ação: Groq API (llama-3.1-8b-instant) → resposta falada por TTS
+  Suporta streaming (fala trechos conforme chegam)
+
+─────────────────────────────────────────────────────────
+ 7. YOUTUBE
+─────────────────────────────────────────────────────────
+
+[youtube]          — Pesquisar/abrir no YouTube
+  Exemplos: "pesquisa no youtube", "toca no youtube", "quero ouvir [música]"
+  Ação: abre navegador com URL de busca do YouTube
+
+─────────────────────────────────────────────────────────
+ 8. VISÃO / CÂMERA (Groq Vision)
+─────────────────────────────────────────────────────────
+
+[ver]              — Descrever o que a câmera está vendo
+  Exemplos: "o que você vê", "descreve a cena", "analisa a imagem"
+  Ação: captura frame → Groq Vision (llama-4-scout) → descrição falada
+
+[foto]             — Tirar foto e analisar visual/roupa
+  Exemplos: "tira uma foto", "foto", "me fotografa"
+  Ação: captura frame → Groq Vision (análise de roupa/estilo) → abre foto
+
+[identificar_objeto] — Identificar objeto na câmera
+  Exemplos: "o que é isso", "que objeto é esse", "identifica isso"
+  Ação: captura frame → Groq Vision → nome, uso e características do objeto
+
+─────────────────────────────────────────────────────────
+ 9. GRAVAÇÃO DE VÍDEO (recording.py)
+─────────────────────────────────────────────────────────
+
+[gravacao_iniciar]  — Iniciar gravação de vídeo (com áudio)
+  Exemplos: "iniciar gravação", "começa a gravar", "quero filmar"
+  Ação: grava vídeo (cv2) + áudio (sounddevice) por até 5 minutos
+         Avisa 30s antes de acabar. Junta com ffmpeg.
+
+[gravacao_cancelar] — Parar/cancelar gravação em andamento
+  Exemplos: "para a gravação", "cancela a gravação", "pare de gravar"
+  Ação: sinaliza thread → salva o que foi gravado até o momento
+
+─────────────────────────────────────────────────────────
+ 10. GERENCIAMENTO DE ARQUIVOS (file_manager.py)
+─────────────────────────────────────────────────────────
+
+[file_find]        — Localizar arquivo no sistema (fuzzy matching)
+  Exemplos: "onde está [arquivo]", "localiza [arquivo]", "acha [arquivo]"
+  Ação: busca recursiva em ~/ com SequenceMatcher → retorna caminho
+
+[file_open]        — Abrir arquivo com aplicação apropriada
+  Exemplos: "abre [arquivo]", "abrir arquivo", "executa [arquivo]"
+  Ação: localiza + abre com app certa (.pdf→xdg-open, .exe→wine, .py→python3, .sh→bash)
+
+[file_list]        — Listar arquivos de uma pasta
+  Exemplos: "quais arquivos tem na pasta", "lista os arquivos", "o que tem na pasta"
+  Ação: lista, categoriza por tipo, resume via Groq. Salva .txt se >50 arquivos.
+
+─────────────────────────────────────────────────────────
+ 11. ANOTAÇÕES & LEMBRETES (notes.py)
+─────────────────────────────────────────────────────────
+
+[nota_criar]       — Criar anotação simples
+  Exemplos: "anota aí", "salva isso", "cria uma nota", "não esqueça"
+  Ação: salva em jarvis_notes.json com data/hora
+
+[nota_lembrar]     — Criar lembrete com horário
+  Exemplos: "me lembra às 15:30", "me avisa às 9", "cria um lembrete"
+  Ação: salva nota + agenda threading.Timer para avisar no horário
+
+[nota_listar]      — Listar anotações e lembretes
+  Exemplos: "minhas anotações", "quais são meus lembretes"
+  Ação: lê jarvis_notes.json → fala resumo das notas e lembretes ativos
+
+[nota_apagar]      — Apagar anotação específica
+  Exemplos: "apaga a nota sobre [X]", "remove o lembrete"
+  Ação: fuzzy matching por palavras-chave (+ Groq para desambiguação)
+
+─────────────────────────────────────────────────────────
+ 12. MEMÓRIA / HISTÓRICO (memory.py)
+─────────────────────────────────────────────────────────
+
+[memoria]          — Consultar histórico de conversas
+  Exemplos: "o que conversamos hoje", "o que falamos ontem",
+            "o que conversamos na segunda", "o que disse de manhã"
+  Ação: filtra jarvis_memory.json por data/período → resumo via Groq
+  Suporta: hoje, ontem, dia da semana, manhã/tarde/noite/madrugada
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PARTE 2 — COMANDOS POR GESTO (main.py → brain.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Detecção: MediaPipe Hands → gestures.py (análise de dedos) → main.py (mapeamento)
+Cada gesto requer CONFIRMACAO_FRAMES=2 frames seguidos para ativar.
+
+ LEGENDA DOS DEDOS:
+   P = Polegar | I = Indicador | M = Médio | A = Anelar | Mi = Mínimo
+   est = estendido | dob = dobrado
+
+─────────────────────────────────────────────────────────
+ GESTOS FORA DO MODO MOUSE (padrão)
+─────────────────────────────────────────────────────────
+
+[Gesto "1"]  — I(est) M(dob) A(dob) Mi(dob) P(dob)
+  → Volume DOWN (pyautogui.press('volumedown'))
+
+[Gesto "2"]  — I(est) M(est) A(dob) Mi(dob) P(dob)
+  → Conectar WoMic (celular como microfone via WiFi)
+
+[Gesto "3"]  — I(est) M(est) P(est) A(dob) Mi(dob)
+  → Ligar voz do JARVIS (voz_ativa = True)
+
+[Gesto "4"]  — I(est) M(est) A(est) Mi(est) P(dob)
+  → Desligar voz do JARVIS (voz_ativa = False)
+
+[Gesto "5"]  — TODOS estendidos (mão aberta)
+  → (sem ação mapeada no process_command)
+
+[Gesto "6"]  — Mi(est) I(dob) M(dob) A(dob) P(dob) (só mindinho)
+  → TOGGLE bloqueio de gestos (modo segurança on/off)
+
+[Gesto "7"]  — I(est) P(est) M(dob) A(dob) Mi(dob)
+  → TOGGLE modo mouse (controle de cursor por mão)
+
+[Gesto "DB"] — P(est) I(dob) M(dob) A(dob) Mi(dob) (só polegar)
+  → Tela cheia (pyautogui.press("f"))
+
+[Gesto "Mute"]    — TODOS dobrados (punho fechado) + debounce 2s
+  → Toggle mute do sistema (pactl)
+
+[Gesto "Rock"]    — I(est) Mi(est) M(dob) A(dob) P(est) (chifres)
+  → Abrir VS Code (os.system("code"))
+
+[Gesto "Encerrar"] — M(est) I(dob) A(dob) Mi(dob) P(est) (dedo do meio + polegar)
+  → Desligar computador (poweroff)
+
+─────────────────────────────────────────────────────────
+ GESTOS NO MODO MOUSE (gesto "7" ativo)
+─────────────────────────────────────────────────────────
+
+Quando modo mouse está ATIVO, a mão controla o cursor:
+  → Landmark 10 (base do dedo médio) rastreia posição
+  → Suavização com SMOOTHING_FACTOR = 0.25
+  → Margens de 15% nas bordas
+
+Os gestos mudam de função no modo mouse:
+
+[Gesto "1"]     → Volume DOWN (igual)
+[Gesto "8"]     → I(est) M(est) A(dob) Mi(dob) P(dob) → Recarregar (F5)
+[Gesto "clique"]→ I(est) M(est) P(est) A(dob) Mi(dob) → Clique do mouse
+[Gesto "Next"]  → I(est) M(est) A(est) Mi(est) P(dob) → Próxima faixa (Shift+N)
+[Gesto "Pause"] → TODOS dobrados (punho) → Play/Pause (Space)
+[Gesto "9"]     → M(est) I(dob) A(dob) Mi(dob) P(est) → Sair do JARVIS
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PARTE 3 — FUNÇÕES DE DETECÇÃO DE GESTOS (gestures.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[angulo_entre(v1, v2)]
+  → Calcula ângulo entre dois vetores (usado no polegar)
+
+[dedo_estendido(landmarks, tip, pip, eixo, threshold_ratio, palm_length)]
+  → Detecta se um dedo está estendido comparando tip vs pip no eixo Y/X
+
+[polegar_estendido_angulo(landmarks)]
+  → Detecta polegar estendido pelo ângulo MCP→IP→TIP (< 40°)
+
+[dedo_dobrado_y(landmarks, tip, pip, mcp, threshold_ratio, palm_length)]
+  → Detecta dedo dobrado no eixo Y (tip > pip > mcp)
+
+[dedo_dobrado_x(landmarks, tip, pip, mcp, is_right_hand, ...)]
+  → Detecta dedo dobrado no eixo X (mão esquerda vs direita)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PARTE 4 — SISTEMAS DE SUPORTE (módulos auxiliares)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+─── voice.py (TTS) ───────────────────────────────────────
+  • Motor: edge-tts (Microsoft Azure Neural) + mpv
+  • Voz: pt-BR-AntonioNeural (+40% velocidade)
+  • Streaming: chunks MP3 via pipe direto ao mpv (~300ms latência)
+  • Fallback: salva MP3 em disco → toca com mpv
+  • Registra toda fala na memória (memory.py)
+
+─── listen.py (Escuta) ───────────────────────────────────
+  • Wake word: "Jarvis" via Porcupine (Picovoice)
+  • STT: Whisper (faster-whisper, modelo "small", CPU, int8)
+  • Auto-detecção microfone: WoMic (celular WiFi 48kHz) ou PC (16kHz)
+  • Resample automático 48kHz→16kHz quando usando WoMic
+  • Debounce de comandos: 1.2s entre repetições
+  • Similaridade mínima para intenção: 0.40
+  • Early-exit quando score ≥ 0.85
+
+─── vision.py (Visão) ────────────────────────────────────
+  • API: Groq Vision (llama-4-scout-17b-16e-instruct)
+  • Salva frames em ~/Jarvis_frames/ com timestamp
+  • Thread-safe: frame atualizado pelo main.py a cada ciclo
+
+─── recording.py (Gravação) ──────────────────────────────
+  • Vídeo: cv2.VideoWriter (codec mp4v, 20fps)
+  • Áudio: sounddevice (44.1kHz, mono, int16)
+  • Junção: ffmpeg (vídeo + áudio → mp4 final)
+  • Duração máx: 5 minutos, aviso aos 4min30s
+  • Fallback: vídeo mudo se áudio/ffmpeg indisponível
+
+─── memory.py (Memória) ──────────────────────────────────
+  • Armazena: jarvis_memory.json (máx 2000 entradas)
+  • Registra falas do JARVIS e do USUÁRIO
+  • Filtros: hoje, ontem, dia da semana, manhã/tarde/noite
+  • Resumo: Groq API gera resumo conversado
+
+─── notes.py (Anotações) ─────────────────────────────────
+  • Armazena: jarvis_notes.json (máx 500 notas)
+  • Tipos: nota (simples) e lembrete (com horário)
+  • Lembretes usam threading.Timer para avisar
+  • Apagar usa Groq para desambiguação quando necessário
+
+─── file_manager.py (Arquivos) ───────────────────────────
+  • Busca recursiva em ~/ com fuzzy matching (SequenceMatcher)
+  • Score mínimo: 0.6 para considerar match
+  • Abertura com app correta: xdg-open, wine, bash, python3, etc.
+  • Listagem: categoriza por tipo + resumo via Groq
+
+─── personality.py (Personalidade) ───────────────────────
+  • Gera respostas humanizadas e sarcásticas via Groq
+  • Cache com TTL de 1 hora (hash MD5 do contexto)
+  • Categorias: saudacao, sucesso, erro, nao_encontrado,
+    acao_andamento, aguardando, status, clima, timer, notas, memoria
+
+─── utilities.py (Utilidades) ────────────────────────────
+  • Clima: API Open-Meteo (cache 10 min)
+  • Timer: threading.Timer com suporte a nomes
+  • IA: Groq (llama-3.1-8b-instant) com streaming opcional
+  • Parser de duração por voz (extenso + numérico)
+
+─── emotions.py (Emoções) ────────────────────────────────
+  • Sistema emocional para animação visual do JARVIS
+  • Modo visual muda baseado em interação e hora do dia
+
+─── graphics.py (Interface Visual) ───────────────────────
+  • Desenha avatar do JARVIS no frame (OpenCV)
+  • Animação de "boca falando" sincronizada com TTS
+  • Painel de comandos semitransparente
+  • Landmarks customizados das mãos
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ RESUMO — CONTAGEM TOTAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Comandos de voz (intenções):     32
+  Gestos reconhecidos:             12
+  Módulos do sistema:              14
+
+  TOTAL DE CAPACIDADES:            44+ ações distintas
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
