@@ -20,6 +20,7 @@ __pycache__/
 jarvis_memory.json
 jarvis_notes.json
 Jarvis_frames/
+GravacaoCamera/
 
 # Logs e Arquivos Temporários
 *.log
