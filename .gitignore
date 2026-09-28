@@ -21,6 +21,9 @@ jarvis_memory.json
 jarvis_notes.json
 Jarvis_frames/
 GravacaoCamera/
+jarvis_timer.json
+.dev_backups
+restart.log
 
 # Logs e Arquivos Temporários
 *.log
@@ -31,7 +34,11 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+.idea/
+*.swp
+*.log
 .DS_Store
+VozGestos.txt
 
 # Diretório de backup temporário (local)
 backupFilesLastFunctions/

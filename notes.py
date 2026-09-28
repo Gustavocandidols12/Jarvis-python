@@ -33,6 +33,7 @@ import re
 import time
 import datetime
 import threading
+from voice import jarvis_voice   # [BOOT-PERSIST] fala dos lembretes perdidos
 
 try:
     from config import GROQ_API_KEY, GROQ_MODELO
@@ -40,7 +41,7 @@ try:
     load_dotenv()
 except ImportError:
     GROQ_API_KEY = ""
-    GROQ_MODELO  = "llama-3.1-8b-instant"
+    GROQ_MODELO  = "llama-3.3-70b-versatile"
 
 # -----------------------------------------------------------------------
 # CONFIGURAÇÕES
@@ -307,30 +308,40 @@ def criar_lembrete(texto_bruto: str) -> str:
         dia_str = " de amanhã"
     return f"Lembrete criado, senhor. Vou te avisar sobre '{conteudo}' às {horario}{dia_str}."
 
-
 def reativar_lembretes():
     """
-    Reativa timers de lembretes pendentes ao iniciar o sistema.
-    Chame no brain.py ou main.py durante a inicialização.
+    [BOOT-PERSIST] Reativa lembretes pendentes ao iniciar:
+    - horário futuro → reagendado;
+    - perdeu há menos de 5 min → dispara em 1s;
+    - perdeu há mais → avisa a perda (agrupado numa fala) e remove.
+    Chame no main.py durante a inicialização.
     """
     notas = _carregar()
     agora = datetime.datetime.now()
     reativados = 0
+    perdidos = []
+    restantes = []
 
     for nota in notas:
         if nota.get("tipo") != "lembrete" or not nota.get("lembrar_as"):
+            restantes.append(nota)
             continue
         if nota["id"] in _timers_lembretes:
-            continue  # já ativo
+            restantes.append(nota)   # já ativo (não ocorre no boot)
+            continue
+        try:
+            h, m = map(int, nota["lembrar_as"].split(":"))
+        except (ValueError, AttributeError):
+            restantes.append(nota)
+            continue
 
-        h, m = map(int, nota["lembrar_as"].split(":"))
         alvo = datetime.datetime.combine(
             datetime.date.fromisoformat(nota["data"]),
-            datetime.time(h, m)
-        )
-        # Se o lembrete é de hoje e ainda não passou
-        if alvo > agora:
-            segundos = (alvo - agora).total_seconds()
+            datetime.time(h, m))
+        atraso_min = (agora - alvo).total_seconds() / 60
+
+        if atraso_min <= 0:                      # futuro → reagenda
+            segundos = -atraso_min * 60
             t = threading.Timer(segundos, _disparar_lembrete,
                                 args=(nota["id"], nota["texto"]))
             t.daemon = True
@@ -338,10 +349,29 @@ def reativar_lembretes():
                 _timers_lembretes[nota["id"]] = t
             t.start()
             reativados += 1
+            restantes.append(nota)
+        elif atraso_min <= 5:                    # atraso curto → dispara já
+            t = threading.Timer(1.0, _disparar_lembrete,
+                                args=(nota["id"], nota["texto"]))
+            t.daemon = True
+            with _lock_timers:
+                _timers_lembretes[nota["id"]] = t
+            t.start()
+            reativados += 1
+            restantes.append(nota)
+        else:                                    # perdido há muito → avisa e remove
+            perdidos.append((nota["texto"], nota["lembrar_as"]))
+
+    _salvar(restantes)
 
     if reativados:
-        print(f"[NOTES] {reativados} lembrete(s) reativado(s).")
-
+        print(f"[NOTES] {reativados} lembrete(s) reativado(s) no boot.")
+    if perdidos:
+        lista = "; ".join(f"'{texto}' às {hora}" for texto, hora in perdidos)
+        print(f"[NOTES] Lembretes perdidos: {lista}")
+        jarvis_voice.falar(
+            f"Senhor, perdi {len(perdidos)} lembrete(s) enquanto estive "
+            f"desligado: {lista}.")
 
 # -----------------------------------------------------------------------
 # API PÚBLICA — LISTAR ANOTAÇÕES

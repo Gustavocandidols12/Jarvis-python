@@ -1,56 +1,17 @@
 """
 FILE: listen.py
-DESCRIPTION: Gerencia o sistema de escuta ativa do JARVIS.
+DESCRIPTION: Gerencia a escuta ativa do JARVIS.
              Pipeline: Wake Word → Gravação → STT → Interpretação → Ação.
 
-═══════════════════════════════════════════════════════
-ERROS CORRIGIDOS:
-  [FIX-1] Wake word loop tinha `if self.pausado: continue` DENTRO de
-          `while not self.pausado` — check interno era código morto (nunca executava).
-          Corrigido: verificação de pausa no topo do while, sem duplicata interna.
+v3 — [ECO-GUARD] duas camadas anti-eco do próprio TTS:
+     1) gravação aborta se o TTS começar a falar no meio dela;
+     2) transcrição comparada às últimas falas do JARVIS (voice.py)
+        — 40%+ de sobreposição com fala longa = descartada como eco.
+     Sem isso, o JARVIS se auto-comandava ao ouvir a própria resposta
+     ("a previsão para hoje..." → re-executava o comando do clima).
 
-  [FIX-2] FRAÇÃO_FRAMES_VOZ_MINIMA era declarada mas nunca verificada —
-          áudio de silêncio puro chegava ao Whisper desnecessariamente.
-          Corrigido: verificação real implementada antes do STT.
-
-  [FIX-3] `_fila_audio` era criada no __init__ mas nunca usada em nenhum lugar.
-          Removida para não gerar confusão sobre o design.
-
-  [FIX-4] Chave "Abrir_navegador" com maiúscula inconsistente com o resto do dict.
-          Normalizado para "abrir_navegador" (brain.py atualizado também).
-
-  [FIX-5] `import unicodedata` e `import re` ocorriam DENTRO de métodos chamados
-          centenas de vezes. Movidos para o topo do arquivo.
-
-  [FIX-6] `_normalizar_texto` era método estático de instância mas não usava self.
-          Extraído para função de módulo — chamada mais rápida sem lookup de instância.
-
-OTIMIZAÇÕES DE LATÊNCIA:
-  [OPT-1] Gravação começa ANTES do bip terminar (bip em thread separada já existia,
-          mas o stream de gravação abria APÓS). Agora são simultâneos → ~100ms ganhos.
-
-  [OPT-2] FRAMES_SILENCIO_PARAR: 30 → 18
-          30 frames × 1024/16000 ≈ 1.92s de silêncio para parar
-          18 frames × 1024/16000 ≈ 1.15s de silêncio para parar
-          Ganho: ~770ms a menos de espera no final de cada comando.
-
-  [OPT-3] Whisper: adicionado best_of=1 explícito (garante single-pass sem reamostrar).
-
-  [OPT-4] Intenções pré-compiladas em sets de palavras na importação do módulo.
-          Antes: set(variacao.split()) era chamado a cada comparação (centenas de vezes).
-          Agora: calculado uma única vez, resultando em ~60% menos tempo de interpretação.
-
-  [OPT-5] Early-exit na busca de intenção ao atingir score >= 0.85.
-          Em comandos óbvios ("que horas são", "clima") não varre o dict inteiro.
-
-  [OPT-6] DEBOUNCE_COMANDO_SEG: 2.0 → 1.2s
-          Mais responsivo sem risco real de duplicata.
-
-  [OPT-7] Bip: 0.15s → 0.10s, 800Hz → 1000Hz (mais agradável e mais curto).
-
-  [OPT-8] VozNaoEntendeu só dispara quando havia energia real no áudio.
-          Evita o JARVIS falar "não entendi" quando simplesmente não captou nada.
-═══════════════════════════════════════════════════════
+v3 — novos comandos: instagram, mario64, chat_zai.
+     MAX_RETENTATIVAS_SEM_WAKE = 2 (uma re-escuta após "não entendi").
 """
 import re
 import threading
@@ -61,17 +22,17 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 import random
-from voice import jarvis_voice
+from voice import jarvis_voice, get_ultimas_falas   # [ECO-GUARD]
 from config import VozNaoEntendeu
-
-# -----------------------------------------------------------------------
-# CONFIGURAÇÕES DO MÓDULO
-# -----------------------------------------------------------------------
 
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# -----------------------------------------------------------------------
+# CONFIGURAÇÕES DO MÓDULO
+# -----------------------------------------------------------------------
 
 WAKE_WORD_ATIVO           = True
 PORCUPINE_ACCESS_KEY      = os.getenv("PORCUPINE_ACCESS_KEY", "sua_chave_aqui")
@@ -79,57 +40,64 @@ WAKE_WORD_KEYWORD         = "jarvis"
 WAKE_WORD_SENSIBILIDADE   = 0.7
 WAKE_WORD_GANHO           = 2.0
 WAKE_WORD_CONFIRMACOES    = 1
-WAKE_WORD_COOLDOWN_SEG    = 2.0
+WAKE_WORD_COOLDOWN_SEG    = 1.8
 
-# --- GRAVAÇÃO ---
-SAMPLE_RATE               = 16000   # rate exigido pelo Porcupine e Whisper
+OWW_MODELO    = "hey_jarvis"
+OWW_THRESHOLD = 0.48   # [v4] 0.5→0.42: detecta mais fácil. 0.35=quase sempre | 0.5=padrão
+
+SAMPLE_RATE               = 18000
 CANAIS                    = 1
 BLOCKSIZE                 = 1024
 GANHO_AMPLIFICACAO        = 4.0
-DURACAO_GRAVACAO_SEG      = 5.0
+DURACAO_GRAVACAO_SEG      = 3.2
 
-# [FIX-WOMIC] O dispositivo hw:1,1 (Loopback do WoMic) só aceita 48000Hz.
-# Abrir com 16000Hz causava "Invalid sample rate [PaErrorCode -9997]".
-# Solução: gravar em 48000Hz no WoMic e resamplear para 16000Hz antes do STT.
 WOMIC_SAMPLE_RATE         = 48000
 WOMIC_DEVICE_HW           = "hw:1,1"
 WOMIC_PROCESS_NAME        = "micclient"
 
-# Threshold de silêncio separado por fonte (WoMic tem mais ruído de rede)
 SILENCIO_RMS_THRESHOLD_PC    = 0.002
 SILENCIO_RMS_THRESHOLD_WOMIC = 0.005
 
-# Ganho separado por fonte
 GANHO_WOMIC = 3.0
 GANHO_PC    = 4.0
 
-# [OPT-2] Reduzido 30 → 18
 FRAMES_SILENCIO_PARAR     = 18
 FRAMES_IGNORAR_INICIO     = 3
 FRACAO_FRAMES_VOZ_MINIMA  = 0.10
 
-# --- PRÉ-PROCESSAMENTO ---
 NORMALIZAR_AUDIO          = True
 NIVEL_NORMALIZACAO        = 0.9
 
-# --- WHISPER STT ---
 WHISPER_MODEL_SIZE        = "small"
 WHISPER_DEVICE            = "cpu"
 WHISPER_COMPUTE_TYPE      = "int8"
 WHISPER_IDIOMA            = "pt"
 
-# --- DEDUPLICAÇÃO E DEBOUNCE ---
-DEBOUNCE_COMANDO_SEG      = 1.2
+DEBOUNCE_COMANDO_SEG      = 1.5
 SIMILARIDADE_MINIMA       = 0.40
 SCORE_EARLY_EXIT          = 0.85
 
+# --- RETENTATIVA APÓS NÃO ENTENDER ---
+# 1 = gravar UMA vez por wake word (zero re-escutas)
+# 2 = gravar + re-ouvir UMA vez (o que você pediu)  ← atual
+# 3 = re-ouvir duas vezes (comportamento antigo)
+MAX_RETENTATIVAS_SEM_WAKE = 1
+
+# --- FALLBACK DE PESQUISA ---
+FALLBACK_PESQUISA_PALAVRAS = 5
+# --- [v5-AUDIO] SURDEZ DURANTE SOM NO SPEAKER ---
+# Enquanto QUALQUER áudio tocar nos speakers (YouTube, Spotify, vídeo,
+# scrcpy), o listener pausa — o microfone não captura a voz do computador
+# nem a confunde com comandos. Retoma sozinho quando o som para.
+# False = desligado (comportamento antigo).
+AUDIO_EXTERNO_ATIVO      = True
+AUDIO_EXTERNO_POLL_SEG   = 0.75   # frequência da checagem, em segundos
 
 # -----------------------------------------------------------------------
-# AUTO-DETECÇÃO DO DISPOSITIVO DE MICROFONE (WoMic vs PC)
+# AUTO-DETECÇÃO DO MICROFONE (WoMic vs PC)
 # -----------------------------------------------------------------------
 
 def _womic_ativo() -> bool:
-    """Retorna True se o processo micclient estiver rodando."""
     try:
         return subprocess.run(
             ["pgrep", "-f", WOMIC_PROCESS_NAME],
@@ -140,10 +108,6 @@ def _womic_ativo() -> bool:
 
 
 def _detectar_mic() -> tuple:
-    """
-    Retorna (device, sample_rate, ganho, threshold_silencio).
-    WoMic: hw:1,1 @ 48000Hz  |  PC: None (padrão) @ 16000Hz
-    """
     if _womic_ativo():
         print("[LISTEN] WoMic detectado → microfone: celular (48000Hz→16000Hz).")
         return WOMIC_DEVICE_HW, WOMIC_SAMPLE_RATE, GANHO_WOMIC, SILENCIO_RMS_THRESHOLD_WOMIC
@@ -152,11 +116,6 @@ def _detectar_mic() -> tuple:
 
 
 def _resamplear(audio: np.ndarray, orig_rate: int, dest_rate: int) -> np.ndarray:
-    """
-    Resamplea audio de orig_rate para dest_rate com interpolação linear simples.
-    Usado para converter 48000Hz (WoMic) → 16000Hz (Porcupine/Whisper).
-    Não exige scipy — usa apenas numpy.
-    """
     if orig_rate == dest_rate:
         return audio
     razao         = dest_rate / orig_rate
@@ -258,19 +217,29 @@ INTENCOES = {
     "encerrar": [
         "desligar", "encerrar", "desliga o computador", "finaliza o sistema",
         "shutdown", "desliga tudo", "encerra tudo", "desliga a máquina",
-        "finaliza", "pode desligar", "desligue", "apaga o computador",
+        "pode desligar", "desligue", "apaga o computador",
         "fecha tudo e desliga", "quero desligar", "desliga o pc",
         "encerra o sistema", "finaliza o computador", "desliga agora",
         "pode desligar tudo", "fecha e desliga",
     ],
 
     "sair_jarvis": [
-        "fechar jarvis", "encerra o jarvis", "sai do jarvis", "fecha o sistema",
-        "para o jarvis", "encerra o programa", "fecha o jarvis",
+        "fechar jasper", "encerra o jasper", "sai do jasper", "fecha o sistema",
+        "para o jasper", "encerra o programa", "fecha o jasper",
         "desativa o jarvis", "para de rodar", "fecha o aplicativo",
-        "encerrar o jarvis", "pode fechar", "termina o jarvis",
-        "encerra o assistente", "fecha o assistente", "desliga o jarvis",
+        "encerrar o jarvis", "pode fechar", "termina o jasper",
+        "encerra o assistente", "fecha o assistente", "desliga o jasper",
         "para o assistente", "encerra a aplicação", "fechar o programa", "sair",
+    ],
+
+    # [v4] Encerramento de sessão — "só isso" encerra a conversa atual
+    # e volta DIRETO pro aguardando wake word (sem re-escutar)
+    "encerrar_sessao": [
+        "só isso", "so isso", "era isso", "só", "só isso mesmo",
+        "é isso", "e isso", "era só isso", "mais nada", "nada mais",
+        "pode deixar quieto", "deixa assim", "tá bom assim",
+        "tá certo", "isso é tudo", "era só o que eu queria",
+        "encerra a conversa", "fecha a conversa", "pode encerrar",
     ],
 
     "voz_ligar": [
@@ -323,11 +292,45 @@ INTENCOES = {
         "me diz o horário", "qual o horário atual",
     ],
 
+    # [v5-SAUDACOES] separadas por horário — brain.py responde conforme
+    # o relógio E o humor (emotions.obter_fala_humor)
+    "saudacao_bom_dia": [
+        "bom dia", "bom dia jasper", "bom dia jarvis", "bom dia pra você",
+        "bom dia chefe", "acordou bem", "saudações matinais",
+    ],
+    "saudacao_boa_tarde": [
+        "boa tarde", "boa tarde jasper", "boa tarde jarvis",
+        "boa tarde chefe",
+    ],
+    "saudacao_boa_noite": [
+        "boa noite", "boa noite jasper", "boa noite jarvis",
+        "boa noite chefe", "vou dormir", "boa noite pra você",
+    ],
+    "saudacao_tudo_bem": [
+        "tudo bem", "tudo bom com você", "tá tudo bem", "tudo certo",
+        "tudo certo jasper", "tudo bem jasper", "tudo bem jarvis",
+        "como você tá", "como vai", "como você está", "tá bem",
+        "como tá você", "você tá bem", "você está bem",
+    ],
+
+    "quem_sou_eu": [
+        "quem é você", "quem é voce", "quem é você jasper",
+        "quem é voce jasper", "quem é o jasper", "quem é o jarvis",
+        "quem é você jarvis", "quem é voce jarvis", "quem te criou",
+        "quem te fez", "o que você é", "o que voce é", "quem te programou",
+        "se apresenta", "se apresente", "fala de você", "fale de voce",
+        "quem sou eu falando", "com quem eu tô falando",
+        "com quem estou falando",
+    ],
+
     "saudacao": [
-        "oi jarvis", "olá jarvis", "e aí jarvis", "boa tarde", "bom dia",
-        "boa noite", "hey jarvis", "oi tudo bem", "salve jarvis", "fala jarvis",
-        "tudo certo jarvis", "oi sumido", "olá tudo bem", "ei jarvis",
-        "como você tá", "como vai", "tudo bom", "como está", "e então", "tá acordado",
+        # genéricas que não são por horário/estado
+        "oi jasper", "olá jasper", "e aí jasper", "hey jasper",
+        "oi tudo bem", "salve jasper", "fala jasper", "tudo certo jasper",
+        "oi sumido", "olá tudo bem", "ei jasper", "e então", "tá acordado",
+        # [v4-JASPER] variações do nome novo (Jarvis continua, pelos velhos tempos)
+        "oi jarvis", "olá jarvis", "e aí jarvis", "hey jarvis", "fala jarvis",
+        "salve jarvis", "ei jarvis", "jasper", "jarvis",
     ],
 
     "clima_agora": [
@@ -435,6 +438,52 @@ INTENCOES = {
         "mete no youtube", "joga no youtube", "roda no youtube",
         "toca aí", "coloca aí", "bota aí",
         "quero assistir", "me bota", "me coloca aí",
+        "abrir youtube", "abre youtube",
+    ],
+
+    # [NOVO-v3] Instagram (direct/DMs) — brain.py abre a URL do inbox
+    "instagram": [
+        "abre o instagram", "abrir instagram", "abrir o instagram",
+        "instagram", "insta", "abre o insta", "abrir o insta",
+        "abre as mensagens do instagram", "mensagens do instagram",
+        "abre o direct", "abrir direct", "abre o direct do instagram",
+        "direct", "abre o dm", "abrir o dm", "dm do instagram", "dm",
+        "quero ver o instagram", "ver o instagram",
+    ],
+
+    # [NOVO-v3] Super Mario 64 (wine) — brain.py roda o sm64coopdx.exe
+    "mario64": [
+        "abrir mario 64", "abre o mario 64", "abrir o mario 64",
+        "abre mario 64", "jogar mario 64", "quero jogar mario 64",
+        "super mario 64", "supermario 64", "abre o super mario 64",
+        "abrir super mario 64", "roda o mario 64", "inicia o mario 64",
+        "mario 64", "abre o mario", "abrir o mario", "abre mario",
+        "abrir mario", "jogar mario", "quero jogar mario", "liga o mario",
+        "inicia o mario", "sm64", "abre o sm64", "mario",
+    ],
+
+    # [NOVO-v3] Chat da Z.ai — estilo YouTube: extrai a pergunta da frase
+    "chat_zai": [
+        "abre o chat da zai", "abrir o chat da zai", "chat da zai",
+        "abre o chat", "abrir o chat", "abre a zai", "abrir a zai",
+        "zai", "chat", "abre a conversa da zai", "abre a conversa",
+        "fala com a zai", "pergunta pra zai", "pergunta para a zai",
+        "pede pra zai", "pede para a zai", "pede no chat",
+        "pergunta no chat", "abre o chat e pede", "abre o chat e pergunta",
+    ],
+
+    # [v6-IMG] Geração de imagem via Pollinations — brain.py extrai o
+    # pedido (o resto da frase) e chama image_gen.py
+    "imagem_criar": [
+        "cria uma imagem de", "criar uma imagem de", "cria imagem de",
+        "gera uma imagem de", "gerar uma imagem de", "gera imagem de",
+        "faz uma imagem de", "fazer uma imagem de", "faz imagem de",
+        "desenha uma imagem de", "desenhar uma imagem de",
+        "cria uma imagem", "criar uma imagem", "cria imagem", "criar imagem",
+        "gera uma imagem", "gerar uma imagem", "gera imagem", "gerar imagem",
+        "faz uma imagem", "fazer uma imagem", "faz imagem", "fazer imagem",
+        "cria imagem", "gera uma imagem", "desenha", "desenhar",
+        "gerar imagem", "criar imagem",
     ],
 
     "ver": [
@@ -496,7 +545,6 @@ INTENCOES = {
         "encerra a filmagem", "cancela a filmagem",
     ],
 
-    # busca e abertura de arquivos — usadas por file_manager.py via brain.py
     "file_find": [
         "onde está", "onde esta", "localiza", "localizar", "acha",
         "onde fica", "procura", "procura o arquivo", "me acha",
@@ -574,13 +622,275 @@ INTENCOES = {
         "não preciso mais da anotação", "não preciso mais do lembrete",
         "tira essa anotação", "tira essa nota",
     ],
+
+    # [NOVO] Controle do celular via ADB — brain.py roteia para phone_commands.py
+    "phone_espelhar": [
+        "espelhar celular", "espelha o celular", "espelhar o celular",
+        "espelha a tela do celular", "espelhar a tela do celular",
+        "abre o espelhamento", "abrir espelhamento",
+        "abre o scrcpy", "abrir scrcpy", "scrcpy",
+        "mostra a tela do celular", "mostrar a tela do celular",
+        "projeta o celular", "projetar o celular", "espelhe o celular",
+        "espelhar telefone", "espelha o telefone",
+    ],
+
+    "phone_desespelhar": [
+        "fecha o espelhamento", "fechar espelhamento", "parar espelhamento",
+        "para o espelhamento", "fecha o scrcpy", "fechar scrcpy",
+        "encerra o espelhamento", "encerrar espelhamento",
+    ],
+
+    "phone_abrir_app": [
+        "abrir no celular", "abre no celular", "abrir app no celular",
+        "abre o app no celular", "abre aplicativo no celular",
+        "abrir aplicativo no celular", "abre no telefone", "abrir no telefone",
+        "abre no cel", "abrir no cel",
+    ],
+
+    "phone_fechar_app": [
+        "fechar app no celular", "fecha o app no celular",
+        "fechar aplicativo no celular", "fecha o aplicativo no celular",
+        "fecha no celular", "fechar no celular",
+        "fecha no telefone", "fechar no telefone",
+    ],
+
+    "phone_home": [
+        "home no celular", "tela inicial do celular", "botão home do celular",
+        "home do celular", "volta pro início do celular", "tela inicial do telefone",
+        "home no telefone",
+        # [FIX-CONFUSAO] variações curtas — antes sobras como "tela do celular"
+        # casavam parcialmente com "mostra a tela do celular" (espelhar)
+        "home", "botão home", "tela inicial", "menu", "menu do celular",
+        "volta pra tela do celular", "volta pro celular",
+        "volta pra tela inicial", "página inicial do celular",
+        "home celular", "tela principal do celular",
+    ],
+
+    "phone_voltar": [
+        "voltar no celular", "botão voltar do celular", "volta no celular",
+        "voltar no telefone", "recua no celular", "botão de voltar do celular",
+    ],
+
+    "phone_bloquear": [
+        "bloqueia o celular", "bloquear o celular", "trava o celular",
+        "travar o celular", "bloqueia a tela do celular", "bloquear telefone",
+        "trava o telefone", "bloqueia o telefone",
+    ],
+
+    "phone_desbloquear": [
+        "desbloqueia o celular", "desbloquear o celular", "destrava o celular",
+        "destravar o celular", "desbloqueia a tela do celular",
+        "acorda o celular", "acordar o celular", "desbloqueia o telefone",
+    ],
+
+    "phone_digitar": [
+        "digita no celular", "digitar no celular", "escreve no celular",
+        "escrever no celular", "digita no telefone", "escreve no telefone",
+        "digita isso no celular",
+    ],
+
+    "phone_apps_listar": [
+        "quais apps tem no celular", "apps do celular", "lista os apps do celular",
+        "aplicativos do celular", "quais aplicativos no celular",
+        "apps instalados no celular", "lista os aplicativos do celular",
+        "apps do telefone",
+    ],
+
+    "phone_status": [
+        "celular conectado", "o celular tá conectado", "status do celular",
+        "verifica o celular", "verificar o celular", "checa o celular",
+        "checar o celular", "status do telefone", "telefone conectado",
+    ],
+
+    "phone_notificacoes_listar": [
+        "notificações do celular", "quais notificações", "ver notificações",
+        "tem notificação no celular", "quantas notificações",
+        "lê as notificações", "leia as notificações",
+        "notificações do telefone", "tem notificação no telefone",
+        "o que chegou no celular", "quais as notificações",
+    ],
+
+    "phone_notificacoes_limpar": [
+        "limpa as notificações", "apaga as notificações", "limpar notificações",
+        "apagar notificações", "limpa as notificações do celular",
+        "apaga as notificações do celular", "limpar notificações do celular",
+        "apagar notificações do celular", "excluir notificações",
+        "exclui as notificações", "limpa notificações do telefone",
+    ],
+
+    "phone_notificacoes_abrir": [
+        "abre as notificações", "abrir notificações", "abre notificações",
+        "abre o painel de notificações", "abrir painel de notificações",
+        "abre as notificações do celular", "desce o painel de notificações",
+    ],
+
+    "phone_wifi": [
+        "liga o wifi", "ligar wifi", "liga o wifi do celular", "liga wifi",
+        "desliga o wifi", "desligar wifi", "desliga o wifi do celular",
+        "ativa o wifi", "desativa o wifi", "conecta o wifi",
+        "wifi do celular", "wifi",
+    ],
+
+    "phone_bluetooth": [
+        "liga o bluetooth", "ligar bluetooth", "desliga o bluetooth",
+        "desligar bluetooth", "ativa o bluetooth", "desativa o bluetooth",
+        "bluetooth do celular", "bluetooth",
+    ],
+
+    "phone_vibrar": [
+        "vibra o celular", "faz o celular vibrar", "vibrar o celular",
+        "vibra o telefone", "faz o telefone vibrar", "vibra celular",
+        "ping no celular", "tocar no celular",
+    ],
+
+    "phone_screenshot": [
+        "print do celular", "captura a tela do celular", "screenshot do celular",
+        "tira um print do celular", "printscreen do celular",
+        "capturar tela do celular", "tira print do celular",
+        "print da tela do celular",
+    ],
+
+    "phone_bateria": [
+        "bateria do celular", "quanto de bateria no celular", "bateria do telefone",
+        "nível de bateria do celular", "carga do celular", "bateria no celular",
+        "como está a bateria do celular", "quanto de carga no celular",
+    ],
+
+    "phone_media": [
+        "play no celular", "pausa no celular", "pausar no celular",
+        "próxima música no celular", "passa a música no celular",
+        "música anterior no celular", "dá play no celular",
+        "play pause no celular", "toca no celular",
+    ],
+
+    # [NOVO] Controle da janela do JARVIS — brain.py roteia para window.py
+    "janela_sair": [
+        "sai da tela", "sair da tela", "some da tela", "sumir da tela",
+        "sai da minha frente", "desaparece da tela", "esconde a janela",
+        "esconde a interface", "tira a janela da tela", "pode sair da tela",
+        "sai da view",
+    ],
+
+    "janela_voltar": [
+        "volta pra tela", "voltar pra tela", "aparece na tela",
+        "aparece de novo", "mostra a janela", "volta a janela",
+        "pode voltar", "volta pra frente", "traz a janela de volta",
+    ],
+
+    "janela_maior": [
+        "fica maior", "aumenta a janela", "aumenta a interface",
+        "deixa a janela maior", "aumenta o jarvis", "fica grande",
+        "cresce a janela",
+    ],
+
+    "janela_menor": [
+        "fica menor", "diminui a janela", "diminui a interface",
+        "deixa a janela menor", "diminui o jarvis", "fica pequena",
+        "encolhe a janela", "encolhe",
+    ],
+
+    "janela_canto": [
+        "vai pro canto", "vá pro canto", "vai pro canto da tela",
+        "canto da tela", "vai pro cantinho", "se esconde no canto",
+    ],
+
+    "janela_centro": [
+        "volta pro centro", "vai pro centro", "centro da tela",
+        "centraliza", "centraliza a janela", "no centro da tela",
+    ],
+
+    "janela_esquerda": [
+        "vai pra esquerda", "vai para a esquerda", "move pra esquerda",
+        "janela pra esquerda", "vai pra lateral esquerda", "lateral esquerda",
+    ],
+
+    "janela_direita": [
+        "vai pra direita", "vai para a direita", "move pra direita",
+        "janela pra direita", "vai pra lateral direita", "lateral direita",
+    ],
+
+    "janela_cima": [
+        "vai pra cima", "vai para cima", "move pra cima",
+        "janela pra cima", "sobe a janela", "vai pro topo", "topo da tela",
+    ],
+
+    "janela_baixo": [
+        "vai pra baixo", "vai para baixo", "move pra baixo",
+        "janela pra baixo", "desce a janela", "vai pro rodapé",
+        "rodapé da tela",
+    ],
+
+    "janela_canto_sup_esq": [
+        "vai pro canto superior esquerdo", "canto superior esquerdo",
+        "vai pro cantinho de cima", "canto de cima esquerda",
+    ],
+
+    "janela_canto_inf_esq": [
+        "vai pro canto inferior esquerdo", "canto inferior esquerdo",
+        "canto de baixo esquerda",
+    ],
+
+    "janela_canto_sup_dir": [
+        "vai pro canto superior direito", "canto superior direito",
+        "canto de cima direita",
+    ],
+
+    # [v7-DEV] MODO DEV — entra SOMENTE por frase explícita (evita
+    # conflito com 'criar imagem', 'pesquisar' etc). Uma vez dentro,
+    # o brain controla o fluxo — cada frase vira pergunta da IA.
+    "dev_codigo": [
+        "modo dev", "modo dev ativado", "entrar em modo dev",
+        "modo desenvolvedor", "entrar no modo desenvolvedor",
+        "ativar modo dev", "ativa o modo dev", "liga o modo dev",
+        "modo programador", "entrar em modo programador",
+        "iniciar modo dev", "começa o modo dev", "modo código",
+        "entrar em modo código", "vamos atualizar esse codigo",
+    ],
+
+    # [v7-DEV] sair do modo dev (só válido quando estiver dentro — o brain
+    # intercepta estas frases ANTES do interpretador comum)
+    "dev_sair": [
+        "sair do modo dev", "sai do modo dev", "sai do dev",
+        "desativar modo dev", "desativa o modo dev", "fecha o modo dev",
+        "encerra o modo dev", "sair do modo desenvolvedor",
+        "sai do modo desenvolvedor", "modo dev off", "sai daqui",
+        "cancela o modo dev", "exit dev",
+    ],
+
+    # [ALARM] parar o despertador quando estiver tocando
+    "despertador_parar": [
+        "para o despertador", "parar despertador", "desliga o despertador",
+        "para o alarme", "parar alarme", "desliga o alarme",
+        "cala esse alarme", "bom dia jarvis", "bom dia jasper",
+        "acordei", "tô acordado", "tô de pé", "já tô acordado",
+        "pode parar o alarme", "chega de alarme",
+    ],
+
+    # aprovação do dev agent (só valem enquanto ele espera sim/não)
+    "confirmar_sim": [
+        "sim", "pode sim", "aprovo", "aprovado", "confirmo", "manda ver",
+        "pode aplicar", "tá aprovado", "aplica aí",
+    ],
+
+    "confirmar_nao": [
+        "não", "nao", "negativo", "rejeito", "não aprovo", "nao aprovo",
+        "cancela isso", "desfaz", "reverte", "não pode", "para tudo",
+    ],
+    "Atualizar_sistema": [
+        "atualizar sistema", "atualiza o sistema", "atualizar o sistema",
+        "atualiza sistema", "atualizar jarvis", "atualiza jarvis",
+        "atualizar jasper", "atualiza jasper", "atualizar o jarvis",
+        "atualiza o jarvis", "atualizar o jasper", "atualiza o jasper",
+        "verificar atualizações", "verifica atualizações",
+        "verificar atualizacoes", "verifica atualizacoes", "atualiza a maquina",
+        "atualizar a maquina", "atualiza o sistema operacional", "atualizar o sistema operacional",
+        "atualiza o sistema operacional do jarvis", "atualizar dependenciar" 
+    ],
 }
 
 
 # -----------------------------------------------------------------------
-# PRÉ-COMPILAÇÃO DE INTENÇÕES [OPT-4]
-# Cada variação vira um set de palavras UMA VEZ ao importar o módulo.
-# Durante o reconhecimento, apenas consulta os sets já prontos.
+# PRÉ-COMPILAÇÃO DE INTENÇÕES
 # -----------------------------------------------------------------------
 _INTENCOES_COMPILADAS: list = []
 
@@ -593,11 +903,6 @@ def _compilar_intencoes():
 
 _compilar_intencoes()
 
-
-# -----------------------------------------------------------------------
-# UTILITÁRIOS DE MÓDULO [FIX-5] [FIX-6]
-# Movidos para escopo de módulo — sem import e sem lookup de instância.
-# -----------------------------------------------------------------------
 
 def _normalizar_texto(texto: str) -> str:
     texto = texto.lower().strip()
@@ -617,9 +922,10 @@ class ListenEngine:
     def __init__(self):
         self._modelo_stt        = None
         self._porcupine         = None
+        self._oww_model         = None
+        self._motor_wake_word   = None
         self._ativo             = False
         self._thread            = None
-        # [FIX-3] _fila_audio removida — nunca foi usada
 
         self._ultimo_comando    = ""
         self._tempo_ultimo_cmd  = 0.0
@@ -628,6 +934,12 @@ class ListenEngine:
         self._callbacks: list   = []
         self.pausado            = False
 
+        # [ORBS] estados expostos para o enxame visual
+        self.gravando    = False
+        self.processando = False
+        # [v5-AUDIO] True enquanto algo toca nos speakers (pactl RUNNING)
+        self.audio_externo   = False
+        self._thread_audio   = None
     # -------------------------------------------------------------------
     # API PÚBLICA
     # -------------------------------------------------------------------
@@ -644,26 +956,19 @@ class ListenEngine:
         )
         print(f"[LISTEN] Modelo '{WHISPER_MODEL_SIZE}' carregado.")
         if WAKE_WORD_ATIVO:
-            self._inicializar_porcupine()
+            self._inicializar_wake_word()
         self._ativo  = True
         self._thread = threading.Thread(target=self._loop_principal, daemon=True)
         self._thread.start()
         print("[LISTEN] Sistema de escuta ATIVO.")
 
+        # [v5-AUDIO] vigilância do speaker — pausa a escuta durante sons
+        if AUDIO_EXTERNO_ATIVO:
+            self._thread_audio = threading.Thread(
+                target=self._monitor_audio_externo, daemon=True)
+            self._thread_audio.start()
     def stop(self):
-        """
-        Encerra o sistema de escuta de forma segura.
-
-        SEGFAULT FIX: o Porcupine é uma biblioteca C++ (via ctypes).
-        Se chamarmos self._porcupine.delete() enquanto a thread ainda está
-        no meio de self._porcupine.process(), liberamos memória que ainda
-        está sendo usada → segmentation fault.
-
-        Solução: sinalizar parada (_ativo = False), aguardar a thread
-        terminar com join() e SÓ ENTÃO deletar o handle do Porcupine.
-        join(timeout=3) evita travar para sempre se a thread estiver presa
-        numa leitura de microfone bloqueante.
-        """
+        """Encerra a escuta com segurança (join antes de deletar o Porcupine)."""
         self._ativo = False
 
         if self._thread and self._thread.is_alive():
@@ -679,7 +984,7 @@ class ListenEngine:
         print("[LISTEN] Sistema de escuta encerrado.")
 
     # -------------------------------------------------------------------
-    # BIP [OPT-7]
+    # BIP
     # -------------------------------------------------------------------
 
     def _tocar_bip(self):
@@ -689,40 +994,105 @@ class ListenEngine:
         sd.wait()
 
     # -------------------------------------------------------------------
+    # [v5-AUDIO] SURDEZ DURANTE SOM EXTERNO
+    # -------------------------------------------------------------------
+
+    def _monitor_audio_externo(self):
+        """
+        Vigia o PulseAudio: algo tocando nos speakers → escuta pausada;
+        som parou → escuta retoma sozinha. Detecção: linhas
+        'State: RUNNING' em 'pactl list sink-inputs'.
+
+        - O TTS do próprio JARVIS (mpv) também conta — nesses momentos a
+          escuta já está pausada via boca_falando; zero conflito.
+        - pactl falhou → assume silêncio (a escuta NUNCA trava por erro).
+        - Só pausa a ESCUTA: gravação em andamento NÃO é abortada (o
+          eco-guard continua ligado apenas ao TTS, via self.pausado) —
+          assim o bip da wake word nunca derruba o comando seguinte.
+        """
+        externo_antes = False
+        while self._ativo:
+            tocando = False
+            try:
+                r = subprocess.run(
+                    ["pactl", "list", "sink-inputs"],
+                    capture_output=True, text=True, timeout=2)
+                tocando = "State: RUNNING" in (r.stdout or "")
+            except Exception:
+                tocando = False
+
+            self.audio_externo = tocando
+            if tocando != externo_antes:
+                if tocando:
+                    print("[LISTEN] Som no speaker — escuta pausada.")
+                else:
+                    print("[LISTEN] Speaker em silêncio — escuta retomada.")
+                externo_antes = tocando
+
+            time.sleep(AUDIO_EXTERNO_POLL_SEG)
+
+    # -------------------------------------------------------------------
     # WAKE WORD
     # -------------------------------------------------------------------
 
-    def _inicializar_porcupine(self):
+    def _inicializar_wake_word(self):
+        """Cascata: 1) Porcupine → 2) openWakeWord (fallback local) → 3) nenhum."""
+        self._motor_wake_word = None
+        self._porcupine       = None
+        self._oww_model       = None
+
+        if PORCUPINE_ACCESS_KEY and PORCUPINE_ACCESS_KEY != "sua_chave_aqui":
+            try:
+                import pvporcupine
+                self._porcupine = pvporcupine.create(
+                    access_key=PORCUPINE_ACCESS_KEY,
+                    keywords=[WAKE_WORD_KEYWORD],
+                    sensitivities=[WAKE_WORD_SENSIBILIDADE],
+                )
+                print(f"[LISTEN] Wake word '{WAKE_WORD_KEYWORD}' ativa via Porcupine.")
+                self._motor_wake_word = "porcupine"
+                return
+            except Exception as e:
+                print(f"[LISTEN] Porcupine falhou ({e}).")
+        else:
+            print("[LISTEN] Chave do Porcupine não configurada.")
+
+        print("[LISTEN] Ativando fallback openWakeWord (100% local)...")
         try:
-            import pvporcupine
-            self._porcupine = pvporcupine.create(
-                access_key=PORCUPINE_ACCESS_KEY,
-                keywords=[WAKE_WORD_KEYWORD],
-                sensitivities=[WAKE_WORD_SENSIBILIDADE],
-            )
-            print(f"[LISTEN] Wake word '{WAKE_WORD_KEYWORD}' ativa "
-                  f"(sens={WAKE_WORD_SENSIBILIDADE}).")
+            from openwakeword.model import Model
+            import openwakeword
+
+            try:
+                self._oww_model = Model(
+                    wakeword_models=[OWW_MODELO],
+                    inference_framework="onnx",
+                )
+            except Exception:
+                print("[LISTEN] Modelo openWakeWord ausente localmente, baixando...")
+                openwakeword.utils.download_models()
+                self._oww_model = Model(
+                    wakeword_models=[OWW_MODELO],
+                    inference_framework="onnx",
+                )
+
+            self._motor_wake_word = "openwakeword"
+            print(f"[LISTEN] Wake word '{OWW_MODELO}' ativa via openWakeWord.")
         except ImportError:
-            print("[LISTEN] pvporcupine não instalado — wake word desativada.")
-            self._porcupine = None
+            print("[LISTEN] openwakeword não instalado (pip install openwakeword). "
+                  "Wake word desativada — gravação contínua.")
         except Exception as e:
-            print(f"[LISTEN] ERRO Porcupine: {e}")
-            self._porcupine = None
+            print(f"[LISTEN] Falha no openWakeWord ({e}). Wake word desativada.")
 
     def _aguardar_wake_word(self) -> bool:
-        if not self._porcupine:
+        if not self._motor_wake_word:
             return True
 
-        frame_length = self._porcupine.frame_length  # Porcupine exige exatamente 16000Hz
+        frame_length = self._porcupine.frame_length if self._porcupine else 1280
         confirmacoes = 0
 
-        # [FIX-WOMIC] Detecta fonte e sample rate nativo do dispositivo
         mic_device, mic_rate, ganho_mic, _ = _detectar_mic()
 
-        # Quando WoMic (48000Hz), precisa ler mais samples para ter o equivalente
-        # ao frame_length em 16000Hz após o resample.
-        # Razão: 48000/16000 = 3 → lê 3x mais samples e resamplea para frame_length
-        razao_rate   = mic_rate // SAMPLE_RATE  # 3 para WoMic, 1 para PC
+        razao_rate   = mic_rate // SAMPLE_RATE
         blocksize_hw = frame_length * razao_rate
 
         try:
@@ -737,16 +1107,17 @@ class ListenEngine:
             return False
 
         fonte_label = "WoMic celular" if mic_device else "PC"
-        print(f"[LISTEN] Aguardando 'Jarvis'... "
+        nome_motor = "Hey Jarvis / Jasper" if self._motor_wake_word == "porcupine" else "Hey Jarvis / Jasper"
+        print(f"[LISTEN] Aguardando '{nome_motor}'... "
               f"(sens={WAKE_WORD_SENSIBILIDADE}, ganho={ganho_mic}x, "
               f"device={fonte_label}, rate={mic_rate}Hz)")
 
         with stream_ctx as stream:
             while self._ativo:
-                if self.pausado:
+                # [v5-AUDIO] pausa = TTS/surdo OU som tocando no speaker
+                if self.pausado or self.audio_externo:
                     time.sleep(0.1)
                     continue
-
                 try:
                     pcm_data, _ = stream.read(blocksize_hw)
                 except Exception as e:
@@ -754,22 +1125,27 @@ class ListenEngine:
                     time.sleep(1)
                     break
 
-                pcm_float = pcm_data[:, 0].astype(np.float32)
+                pcm_float = pcm_data[:, 0].astype(np.float32) / 32768.0
 
-                # [FIX-WOMIC] Resamplea de 48000→16000Hz se necessário
                 if razao_rate != 1:
                     pcm_float = _resamplear(pcm_float, mic_rate, SAMPLE_RATE)
 
-                pcm_float = np.clip(pcm_float * ganho_mic, -32768, 32767)
+                pcm_float = np.clip(pcm_float * ganho_mic, -1.0, 1.0)
 
-                # Garante tamanho exato que o Porcupine espera
                 if len(pcm_float) < frame_length:
                     continue
                 pcm_float = pcm_float[:frame_length]
+                pcm_int16 = (pcm_float * 32767.0).astype(np.int16)
 
-                resultado = self._porcupine.process(pcm_float.astype(np.int16).tolist())
+                detectou = False
+                if self._motor_wake_word == "porcupine":
+                    resultado = self._porcupine.process(pcm_int16.tolist())
+                    detectou = resultado >= 0
+                elif self._motor_wake_word == "openwakeword":
+                    prediction = self._oww_model.predict(pcm_int16)
+                    detectou = max(prediction.values(), default=0.0) > OWW_THRESHOLD
 
-                if resultado >= 0:
+                if detectou:
                     agora = time.time()
                     if agora - self._tempo_ultimo_wake < WAKE_WORD_COOLDOWN_SEG:
                         confirmacoes = 0
@@ -781,7 +1157,7 @@ class ListenEngine:
                     if confirmacoes >= WAKE_WORD_CONFIRMACOES:
                         self._tempo_ultimo_wake = agora
                         confirmacoes = 0
-                        print("[LISTEN] Wake word confirmada!")
+                        print(f"[LISTEN] Wake word confirmada pelo motor {self._motor_wake_word}!")
                         threading.Thread(target=self._tocar_bip, daemon=True).start()
                         return True
                 else:
@@ -796,90 +1172,131 @@ class ListenEngine:
     def _gravar_comando(self) -> tuple:
         """
         Retorna (audio_array_16kHz, frames_com_voz).
-        [FIX-WOMIC] Grava em 48000Hz quando WoMic ativo e resamplea para 16000Hz.
+        [ORBS] self.gravando exposto para o enxame (anel "ouvindo").
+        [ECO-GUARD] aborta se o TTS começar a falar no meio da gravação.
         """
         print("[LISTEN] Gravando...")
-        frames_gravados  = []
-        frames_silencio  = 0
-        frames_com_voz   = 0
-
-        mic_device, mic_rate, ganho_mic, threshold_silencio = _detectar_mic()
-        total_frames_max = int(mic_rate * DURACAO_GRAVACAO_SEG)
-
+        self.gravando = True
         try:
-            stream_ctx = sd.InputStream(
-                samplerate=mic_rate, channels=CANAIS,
-                dtype='float32', blocksize=BLOCKSIZE,
-                device=mic_device,
-            )
-        except Exception as e:
-            print(f"[LISTEN] ERRO stream gravação: {e}")
-            return np.array([], dtype=np.float32), 0
+            frames_gravados  = []
+            frames_silencio  = 0
+            frames_com_voz   = 0
 
-        with stream_ctx as stream:
-            total_frames = 0
-            while total_frames < total_frames_max and self._ativo:
-                try:
-                    frame, _ = stream.read(BLOCKSIZE)
-                except Exception as e:
-                    print(f"[LISTEN] ERRO leitura gravação: {e}")
-                    break
+            mic_device, mic_rate, ganho_mic, threshold_silencio = _detectar_mic()
+            total_frames_max = int(mic_rate * DURACAO_GRAVACAO_SEG)
 
-                frame = frame * ganho_mic
-                frames_gravados.append(frame.copy())
-                total_frames += len(frame)
+            try:
+                stream_ctx = sd.InputStream(
+                    samplerate=mic_rate, channels=CANAIS,
+                    dtype='float32', blocksize=BLOCKSIZE,
+                    device=mic_device,
+                )
+            except Exception as e:
+                print(f"[LISTEN] ERRO stream gravação: {e}")
+                return np.array([], dtype=np.float32), 0
 
-                rms = float(np.sqrt(np.mean(frame ** 2)))
-                if rms < threshold_silencio:
-                    frames_silencio += 1
-                else:
-                    frames_silencio = 0
-                    frames_com_voz += 1
+            with stream_ctx as stream:
+                total_frames = 0
+                while total_frames < total_frames_max and self._ativo:
+                    try:
+                        frame, _ = stream.read(BLOCKSIZE)
+                    except Exception as e:
+                        print(f"[LISTEN] ERRO leitura gravação: {e}")
+                        break
 
-                if frames_silencio >= FRAMES_SILENCIO_PARAR:
-                    print("[LISTEN] Silêncio detectado — encerrando.")
-                    break
+                    # [ECO-GUARD] TTS começou a falar NO MEIO da gravação
+                    # (resposta pendente na fila — thread do clima/IA demorou)
+                    # → aborta: o microfone só ouviria a própria voz do JARVIS.
+                    if self.pausado:
+                        print("[LISTEN] TTS durante a gravação — abortando (anti-eco).")
+                        return np.array([], dtype=np.float32), 0
 
-        if not frames_gravados:
-            return np.array([], dtype=np.float32), 0
+                    frame = frame * ganho_mic
+                    frames_gravados.append(frame.copy())
+                    total_frames += len(frame)
 
-        audio = np.concatenate(frames_gravados, axis=0).flatten()
+                    rms = float(np.sqrt(np.mean(frame ** 2)))
+                    if rms < threshold_silencio:
+                        frames_silencio += 1
+                    else:
+                        frames_silencio = 0
+                        frames_com_voz += 1
 
-        # [FIX-WOMIC] Resamplea 48000→16000Hz para o Whisper processar corretamente
-        if mic_rate != SAMPLE_RATE:
-            audio = _resamplear(audio, mic_rate, SAMPLE_RATE)
+                    if frames_silencio >= FRAMES_SILENCIO_PARAR:
+                        print("[LISTEN] Silêncio detectado — encerrando.")
+                        break
 
-        return audio, frames_com_voz
+            if not frames_gravados:
+                return np.array([], dtype=np.float32), 0
+
+            audio = np.concatenate(frames_gravados, axis=0).flatten()
+
+            if mic_rate != SAMPLE_RATE:
+                audio = _resamplear(audio, mic_rate, SAMPLE_RATE)
+
+            return audio, frames_com_voz
+        finally:
+            self.gravando = False   # [ORBS] cobre TODOS os returns
 
     # -------------------------------------------------------------------
     # TRANSCRIÇÃO (STT)
     # -------------------------------------------------------------------
 
     def _transcrever(self, audio: np.ndarray) -> str:
-        if self._modelo_stt is None:
-            return ""
+        self.processando = True   # [ORBS]
+        try:
+            if self._modelo_stt is None:
+                return ""
 
-        prompt = (
-            "Jarvis, vscode, mute, timer, clima, música, reproduzir, f5, "
-            "tela cheia, mudo, pesquisa, o que é, quem é, me explica, "
-            "anotação, lembrete, memória, youtube, câmera."
-        )
+            prompt = (
+                "Jasper, Jarvis, modo dev, modo desenvolvedor, mudar a cor da HUD, "
+                "vscode, mute, timer, clima, música, reproduzir, f5, "
+                "tela cheia, mudo, pesquisa, o que é, quem é você, me explica, "
+                "anotação, lembrete, memória, youtube, câmera, instagram, mario, "
+                "cria uma imagem de."
+            )
 
-        # [OPT-3] best_of=1 garante single-pass sem reamostrar
-        segments, _ = self._modelo_stt.transcribe(
-            audio,
-            language=WHISPER_IDIOMA,
-            beam_size=1,
-            best_of=1,
-            initial_prompt=prompt,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=200),
-        )
+            segments, _ = self._modelo_stt.transcribe(
+                audio,
+                language=WHISPER_IDIOMA,
+                beam_size=1,
+                best_of=1,
+                initial_prompt=prompt,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=200),
+            )
 
-        return _normalizar_texto(" ".join(seg.text for seg in segments))
+            return _normalizar_texto(" ".join(seg.text for seg in segments))
+        finally:
+            self.processando = False   # [ORBS] cobre todos os returns
 
     # -------------------------------------------------------------------
-    # INTERPRETAÇÃO DE INTENÇÃO [OPT-4] [OPT-5]
+    # [ECO-GUARD] — descarta transcrição que repete a própria fala
+    # -------------------------------------------------------------------
+
+    def _eh_eco(self, texto: str) -> bool:
+        """
+        True se a transcrição repete uma fala recente do JARVIS — cobre o
+        caso de o TTS ter tocado/terminado entre duas checagens de pausa.
+        Só compara falas LONGAS (≥6 palavras): respostas curtas dariam
+        falso positivo com comandos legítimos. Sem acento nos dois lados.
+        """
+        def _sem_acento(s: str) -> str:
+            return "".join(c for c in unicodedata.normalize("NFKD", s)
+                           if not unicodedata.combining(c))
+
+        palavras = set(_sem_acento(texto).split())
+        for fala in get_ultimas_falas():
+            palavras_fala = set(_sem_acento(_normalizar_texto(fala)).split())
+            if len(palavras_fala) < 6:
+                continue
+            inter = palavras & palavras_fala
+            if len(inter) / len(palavras_fala) >= 0.4:
+                return True
+        return False
+
+    # -------------------------------------------------------------------
+    # INTERPRETAÇÃO DE INTENÇÃO
     # -------------------------------------------------------------------
 
     def _interpretar_intencao(self, texto: str, havia_energia: bool = True) -> str | None:
@@ -902,9 +1319,8 @@ class ListenEngine:
 
                 if score > melhor_score:
                     melhor_score    = score
-                    melhor_intencao = intencao_id
+                    melhor_intencao = intencao_id   # ← era AQUI: "intencao" sem _id
 
-                    # [OPT-5] Score alto o suficiente — não precisa varrer mais
                     if melhor_score >= SCORE_EARLY_EXIT:
                         break
 
@@ -915,12 +1331,16 @@ class ListenEngine:
             print(f"[LISTEN] Intenção: '{melhor_intencao}' (score={melhor_score:.2f})")
             return melhor_intencao
 
+        # [FALLBACK] frase longa sem intenção → tratada como pergunta (Groq)
+        if FALLBACK_PESQUISA_PALAVRAS and len(palavras_texto) >= FALLBACK_PESQUISA_PALAVRAS:
+            print(f"[LISTEN] Sem intenção (melhor={melhor_score:.2f}) → "
+                  f"encaminhando como pergunta ao Groq.")
+            return "pesquisar"
+
         print(f"[LISTEN] Nenhuma intenção (melhor={melhor_score:.2f})")
-        # [OPT-8] Só reclama se havia energia real no áudio
         if havia_energia:
             jarvis_voice.falar(random.choice(VozNaoEntendeu))
         return None
-
     # -------------------------------------------------------------------
     # DEBOUNCE
     # -------------------------------------------------------------------
@@ -942,42 +1362,74 @@ class ListenEngine:
     # -------------------------------------------------------------------
 
     def _loop_principal(self):
+        # [v4-SESSAO] retentativas: 0 = exigir wake word. Falha soma 1;
+        # comando compreendido (ou 'só isso') zera.
+        retentativas = 0
+
         while self._ativo:
             try:
-                if WAKE_WORD_ATIVO:
-                    while self.pausado and self._ativo:
-                        time.sleep(0.1)
-                    if not self._ativo:
-                        break
+                # [FIX-SURDO] espera enquanto pausado (TTS/surdo) OU som
+                # no speaker [v5-AUDIO] — música tocando = surdo até parar
+                while (self.pausado or self.audio_externo) and self._ativo:
+                    time.sleep(0.1)
+                if not self._ativo:
+                    break
+
+                # Wake word apenas na primeira tentativa da sequência
+                if WAKE_WORD_ATIVO and retentativas == 0:
                     if not self._aguardar_wake_word():
                         continue
-
-                timeout_pausa = time.time() + 5.0
-                while self.pausado and time.time() < timeout_pausa:
-                    time.sleep(0.05)
 
                 audio, frames_com_voz = self._gravar_comando()
 
                 if len(audio) < SAMPLE_RATE * 0.5:
                     print("[LISTEN] Áudio muito curto, ignorando.")
+                    retentativas = self._registrar_falha(retentativas)
                     continue
 
-                # [FIX-2] Verificação real de energia mínima antes do STT
-                total_frames = len(audio) / BLOCKSIZE
-                fracao_voz   = frames_com_voz / total_frames if total_frames > 0 else 0
+                total_frames  = len(audio) / BLOCKSIZE
+                fracao_voz    = frames_com_voz / total_frames if total_frames > 0 else 0
                 havia_energia = fracao_voz >= FRACAO_FRAMES_VOZ_MINIMA
 
                 if not havia_energia:
                     print(f"[LISTEN] Energia insuficiente ({fracao_voz:.2f}), ignorando.")
+                    retentativas = self._registrar_falha(retentativas)
                     continue
 
                 texto = self._transcrever(audio)
                 if not texto:
                     print("[LISTEN] Transcrição vazia, ignorando.")
+                    retentativas = self._registrar_falha(retentativas)
+                    continue
+
+                # [ECO-GUARD] transcrição = própria fala do JARVIS → descarta
+                if self._eh_eco(texto):
+                    print(f"[LISTEN] Eco da própria voz descartado: '{texto[:40]}...'")
+                    continue
+
+                # [v4-SESSAO] atalho: encerramento explícito SEM interpretar
+                # (comparação sem acento — o _normalizar_texto já tirou os
+                # acentos da transcrição antes de chegar aqui)
+                if texto in ("so isso", "era isso", "mais nada",
+                             "nada mais", "deixa assim", "ta bom assim",
+                             "era so isso", "e isso", "isso e tudo", "nada"):
+                    print("[LISTEN] Sessão encerrada pelo usuário ('só isso').")
+                    retentativas = 0          # ← volta a exigir wake word
+                    self._disparar_callbacks("encerrar_sessao", texto)
                     continue
 
                 intencao = self._interpretar_intencao(texto, havia_energia)
                 if not intencao:
+                    retentativas = self._registrar_falha(retentativas)
+                    continue
+
+                # Comando compreendido → sessão segue, próximo ciclo re-ouve
+                retentativas = 0
+
+                # [v4-SESSAO] encerramento via variação do vocabulário
+                # (ex: "pode deixar quieto" — não está no atalho acima)
+                if intencao == "encerrar_sessao":
+                    self._disparar_callbacks(intencao, texto)
                     continue
 
                 if self._is_duplicado(intencao):
@@ -989,16 +1441,18 @@ class ListenEngine:
             except Exception as e:
                 print(f"[LISTEN] ERRO no loop: {e}")
                 time.sleep(0.5)
+    def _registrar_falha(self, retentativas: int) -> int:
+        """Conta uma falha; ao atingir o máximo, volta a exigir wake word."""
+        retentativas += 1
+        if retentativas >= MAX_RETENTATIVAS_SEM_WAKE:
+            print(f"[LISTEN] {retentativas} tentativas sem comando válido — "
+                  f"voltando a aguardar wake word.")
+            return 0
+        return retentativas
 
     def _disparar_callbacks(self, intencao: str, texto_bruto: str):
         print(f"[LISTEN] ► '{intencao}' | '{texto_bruto}'")
 
-        # [FIX-12] Bloco original importava um objeto "jarvis_memory" que não
-        # existe em memory.py (o módulo só expõe funções soltas, ex: registrar()).
-        # Resultado: ImportError engolido pelo except, e a fala do USUÁRIO nunca
-        # era registrada na memória — só as falas do JARVIS (via voice.py).
-        # Corrigido para usar a função real do módulo, com o mesmo padrão de
-        # import já usado em brain.py ("import memory as _memory").
         try:
             import memory as _memory
             _memory.registrar(texto_bruto, tipo="usuario")
@@ -1012,7 +1466,5 @@ class ListenEngine:
                 print(f"[LISTEN] ERRO callback: {e}")
 
 
-# -----------------------------------------------------------------------
-# INSTÂNCIA ÚNICA
-# -----------------------------------------------------------------------
+# Instância única
 jarvis_listen = ListenEngine()

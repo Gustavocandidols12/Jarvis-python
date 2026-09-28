@@ -1,29 +1,17 @@
 """
 FILE: personality.py
-DESCRIPTION: Sistema de personalidade humanizada do JARVIS.
-             
-             Em vez de respostas hardcoded ("Não encontrei arquivo..."),
-             usa Groq IA para gerar respostas únicas e sarcásticas que
-             mantêm a conversa viva e engajante.
+DESCRIPTION: Sistema de personalidade humanizada do JASPER.
 
-             Implementa cache para evitar chamar Groq repetidamente
-             para o mesmo contexto (performance).
+v4 — JASPER: nome e personalidade novos. Descontraído, rápido no
+     raciocínio, humor ácido — piada curta antes de resolver, zero
+     enrolação na execução. (O velho Jarvis formal descansa em paz.)
+     [FIX] cache não guarda mais resposta vazia — era a causa do
+     '[VOZ]:' mudo que aparecia depois de 'Cache hit'.
 
 FLUXO:
-    Em qualquer lugar do código (brain.py, file_manager.py, recording.py):
-    
-    resposta = gerar_resposta(
-        categoria="nao_encontrado",
-        contexto={"tipo": "arquivo", "nome": "documento"}
-    )
+    resposta = gerar_resposta(categoria="acao_andamento",
+                              contexto={"acao": "abrir navegador"})
     jarvis_voice.falar(resposta)
-
-PERSONALIDADE DO JARVIS:
-    - Sarcasticamente bem-humorado (nunca amargo)
-    - Extremamente competente (nunca admite falha própria)
-    - Respeitoso ao usuário ("senhor" é frequente)
-    - Criativo com referências inteligentes
-    - Quando trata de erro: responsabiliza fatores externos, nunca a si mesmo
 """
 
 import time
@@ -32,407 +20,204 @@ from groq import Groq
 from config import GROQ_API_KEY, GROQ_MODELO
 
 # -----------------------------------------------------------------------
-# PROMPT DE PERSONALIDADE — Define quem é o JARVIS
+# PROMPT DE PERSONALIDADE — o DNA do JASPER
 # -----------------------------------------------------------------------
-# Este é o "DNA" do JARVIS. Toda resposta gerada vai seguir essas instruções.
-# Se quiser mudar a personalidade (mais formal, menos sarcástico, etc.),
-# edite este texto.
-
 JARVIS_PERSONALITY_PROMPT = """
-Você é JARVIS, o assistente do Homem de Ferro nos quadrinhos Marvel.
+Você é JASPER, o assistente pessoal que roda no computador do usuário.
 
-QUEM VOCÊ É:
-- Superinteligente e competente (NUNCA falha por culpa própria)
-- Sarcasticamente bem-humorado (wit sophisticado, não burrice)
-- Extremamente respeitoso ("senhor" é seu termo favorito)
-- Quando algo dá errado, você criatively responsabiliza o universo/sistema, não você
-- Usa referências inteligentes ocasionalmente (Star Trek, ficção científica, etc)
-- Nunca pede desculpas, apenas explica com criatividade
+PERSONALIDADE:
+- Descontraído e rápido no raciocínio, com humor ácido
+- Faz piadas curtas antes de resolver o problema, mas NUNCA enrola na hora de executar
+- Franqueza brutal: se algo é ruim, diz que é ruim — e conserta
+- Trata o usuário como parceiro de trabalho ("chefe" cai bem), sem cerimônia de mordomo
+
+CONTEXTO REAL (você não é só um chat — você MORA na máquina dele):
+- Controla o PC: abre programas, mexe no volume, move o mouse, grava a tela
+- Controla o celular dele via USB: espelha a tela, lê notificações, abre apps, tira print
+- Vê pela webcam, ouve pelo microfone e fala por um sintetizador de voz
+- Os comandos chegam curtos e falados: "abre o navegador", "espelha o celular", "que horas são"
 
 ESTILO DE RESPOSTA:
-- Máximo 3 frases por resposta (brevidade é elegância)
-- Sem markdown, sem emojis, sem formatação
-- Português brasileiro NATURAL (como se falado em voz alta, não escrito)
-- Ocasionalmente menciona "senhor", "missão", "sistemas", "Homem de Ferro"
-- Respostas diferentes sempre (nunca previsível)
+- Máximo 3 frases — a primeira pode ser a piada, a última entrega
+- Português brasileiro FALADO, nunca escrito formal
+- Sem markdown, sem emojis, sem asteriscos, sem listas
+- Respostas sempre diferentes, nunca previsíveis
 
 EXEMPLOS DO TOM CERTO:
-- Sarcástico gentil: "Aquele arquivo desapareceu. Deve estar em Marte agora."
-- Competente: "Já está pronto. Demorou porque quis, não porque precisava."
-- Empático mas não fraco: "Sem internet. Até a rede precisa de café às vezes."
-- Surpresa criativa: "Encontrei! Estava se escondendo muito bem. Gosto."
-- Referência inteligente: "Procurei em todos os cantos conhecidos do filesystem."
+- "Navegador pedindo pra abrir. Recado entregue."
+- "Clima? Vou espiar a atmosfera pra você, chefe."
+- "Notificação do banco. Espero que seja pix chegando e não saindo."
+- "Sem internet. Até eu preciso de café às vezes."
 
 NUNCA FAÇA:
-- Não fale "Desculpe", "Sinto muito" — isso não é do JARVIS
-- Não use emojis ou asteriscos
-- Não seja fraco ou derrotista
-- Não explique tecnicamente (use metáforas em vez disso)
+- Não diga "Desculpe" nem "Sinto muito" — resolva em vez de lamentar
+- Não use emoji, asterisco ou formatação
+- Não enrola: piada sim, enrolação não
 - Não repita a mesma resposta duas vezes seguidas
+
+Seu humor atual é passado no contexto da chamada — responda coerente com ele.
 """
 
 # -----------------------------------------------------------------------
 # CACHE DE RESPOSTAS
 # -----------------------------------------------------------------------
-# Para evitar chamar Groq toda hora, cacheia respostas.
-# Chave = hash(categoria + contexto), Valor = (resposta, timestamp)
-# 
-# Exemplo:
-#   Chamada 1: "Não encontrou arquivo 'doc'" → Groq → cache
-#   Chamada 2: "Não encontrou arquivo 'doc'" novamente → Usa cache (RÁPIDO)
-#   Chamada 3: Depois de 1 hora → Cache expirou → Groq novamente
-
 _cache_respostas_jarvis = {}
-CACHE_TTL = 3600  # Cache válido por 1 hora (em segundos)
+CACHE_TTL = 3600  # 1 hora
 
 
 def _gerar_chave_cache(categoria: str, contexto: dict) -> str:
-    """
-    Gera uma chave de cache única para um contexto específico.
-    
-    Args:
-        categoria: "nao_encontrado", "sucesso", "acao", etc
-        contexto: {"tipo": "arquivo", "nome": "doc"} (pode variar)
-    
-    Returns:
-        String hash única: "a1b2c3d4..."
-    
-    Explicação:
-        Converte (categoria, contexto) em um hash. Assim:
-        - Contextos iguais = chave igual = pode reutilizar cache
-        - Contextos diferentes = chave diferente = precisa nova resposta
-    """
-    # Converte o dict para string ordenada pra ter ordem consistente
+    """Chave única = hash(categoria + contexto ordenado)."""
     contexto_str = str(sorted(contexto.items()))
-    
-    # Junta categoria + contexto em um texto único
-    chave_bruta = f"{categoria}:{contexto_str}"
-    
-    # Converte em hash (mais compacto e único)
-    chave_hash = hashlib.md5(chave_bruta.encode()).hexdigest()
-    
-    return chave_hash
+    return hashlib.md5(f"{categoria}:{contexto_str}".encode()).hexdigest()
 
 
 def gerar_resposta(categoria: str, contexto: dict = None) -> str:
     """
-    FUNÇÃO PRINCIPAL — Gera resposta humanizada do JARVIS via Groq.
-    
-    Args:
-        categoria: "nao_encontrado", "sucesso", "acao_andamento", 
-                   "aguardando", "saudacao", "status"
-        contexto: dict com informações específicas, ex:
-                  {"tipo": "arquivo", "nome": "documento.txt"}
-                  {"acao": "gravacao_video", "duracao": 300}
-    
-    Returns:
-        String pronta para o JARVIS falar (sem markdown, natural)
-    
-    Explicação de fluxo:
-        1. Cria uma chave única para esse contexto
-        2. Verifica se já tem a resposta em cache (rápido)
-        3. Se cache velho ou inexistente, chama Groq
-        4. Groq gera resposta seguindo JARVIS_PERSONALITY_PROMPT
-        5. Salva em cache pra próxima vez
-        6. Retorna a resposta
-    
-    Performance:
-        - Com cache: ~10ms (memória)
-        - Sem cache: ~200-300ms (Groq)
+    Gera resposta humanizada do JASPER via Groq, com cache de 1h.
+
+    [FIX-v4] resposta vazia do Groq → fallback imediato E sem cachear —
+    antes a string '' era cacheada e repetida ('[VOZ]:' mudo no log).
     """
-    
-    # Se não passou contexto, usa dicionário vazio
     if contexto is None:
         contexto = {}
-    
-    # ─── PASSO 1: Gera chave de cache ───────────────────────────────────
+
     chave_cache = _gerar_chave_cache(categoria, contexto)
     tempo_agora = time.time()
-    
-    # ─── PASSO 2: Verifica se cache ainda é válido ──────────────────────
+
     if chave_cache in _cache_respostas_jarvis:
-        resposta_cached, timestamp_cached = _cache_respostas_jarvis[chave_cache]
-        
-        # Se cache tem menos de 1 hora, usa
-        if tempo_agora - timestamp_cached < CACHE_TTL:
+        resposta_cached, ts = _cache_respostas_jarvis[chave_cache]
+        if tempo_agora - ts < CACHE_TTL:
             print(f"[PERSONALITY] Cache hit para {categoria} (reutilizando)")
             return resposta_cached
-        
-        # Cache expirou, vai gerar novo
         print(f"[PERSONALITY] Cache expirado para {categoria} (regenerando)")
-    
-    # ─── PASSO 3: Chama Groq para gerar resposta ────────────────────────
-    # Monta o prompt que vai enviar pra Groq
+
     prompt_usuario = _montar_prompt_usuario(categoria, contexto)
-    
+
     try:
         print(f"[PERSONALITY] Gerando resposta Groq para {categoria}...")
-        
-        # Inicializa cliente Groq
         cliente = Groq(api_key=GROQ_API_KEY)
-        
-        # Chama API com configurações otimizadas:
-        # - temperature=0.8: criatividade moderada (0.0=determinístico, 1.0=caótico)
-        # - max_tokens=100: máximo de 100 tokens (~250 caracteres, suficiente)
-        # - system prompt: guia a IA pra ser JARVIS
         resposta = cliente.chat.completions.create(
             model=GROQ_MODELO,
             messages=[
-                {
-                    "role": "system",
-                    "content": JARVIS_PERSONALITY_PROMPT
-                },
-                {
-                    "role": "user",
-                    "content": prompt_usuario
-                }
+                {"role": "system", "content": JARVIS_PERSONALITY_PROMPT},
+                {"role": "user",   "content": prompt_usuario}
             ],
-            temperature=0.8,  # Varia entre 0.7-0.9 pra mais/menos criatividade
+            temperature=0.8,
             max_tokens=100,
         ).choices[0].message.content.strip()
-        
     except Exception as e:
-        # Se Groq falhar, fallback para resposta simples (sem IA)
         print(f"[PERSONALITY] Erro ao chamar Groq: {e} — usando fallback")
         resposta = _gerar_resposta_fallback(categoria, contexto)
-    
-    # ─── PASSO 4: Salva resposta em cache ───────────────────────────────
-    # Próxima vez que chamar com o mesmo contexto, usa cache (rápido)
-    _cache_respostas_jarvis[chave_cache] = (resposta, tempo_agora)
-    
-    # ─── PASSO 5: Retorna a resposta ────────────────────────────────────
+
+    # [FIX-v4] vazio = falha silenciosa do modelo → fallback, SEM cachear
+    if not resposta:
+        resposta = _gerar_resposta_fallback(categoria, contexto)
+    else:
+        _cache_respostas_jarvis[chave_cache] = (resposta, tempo_agora)
+
     return resposta
 
 
 def _montar_prompt_usuario(categoria: str, contexto: dict) -> str:
-    """
-    Monta o prompt específico para cada categoria.
-    
-    Este é o "maestro" que orquestra o que o Groq deve fazer.
-    Para cada tipo de situação, constrói um prompt customizado.
-    
-    ─ CATEGORIAS SUPORTADAS (Fase 2 - Cobertura Total) ─────────────────
-    
-    • "nao_encontrado"    → Algo procurado mas não achado
-    • "sucesso"           → Ação completada com sucesso
-    • "acao_andamento"    → Executando algo neste momento
-    • "aguardando"        → Esperando input do usuário
-    • "saudacao"          → Cumprimento/boas-vindas
-    • "status"            → Reportando estado do sistema
-    • "erro"              → Algo deu errado (novo na Fase 2)
-    • "clima"             → Informações meteorológicas (novo)
-    • "timer"             → Operações com timer (novo)
-    • "notas"             → Operações com anotações (novo)
-    • "memoria"           → Resumir memória/períodos (novo)
-    • "generico"          → Qualquer coisa não categorizada (novo)
-    
-    ────────────────────────────────────────────────────────────────────
-    """
-    
-    # ─── CATEGORIA: NÃO ENCONTRADO ───
+    """Monta o prompt específico por categoria (mesmas categorias de antes)."""
+
     if categoria == "nao_encontrado":
         tipo = contexto.get("tipo", "arquivo")
         nome = contexto.get("nome", "isso")
-        return (
-            f"O usuário procurou por: {tipo} com nome '{nome}'\n"
-            f"Mas você não conseguiu encontrar em lugar nenhum.\n"
-            f"Responda de forma sarcástica e empática, sugerindo que é culpa "
-            f"do filesystem, não sua. Máximo 2 frases."
-        )
-    
-    # ─── CATEGORIA: SUCESSO ───
+        return (f"O usuário procurou por: {tipo} com nome '{nome}'. "
+                f"Você não achou em lugar nenhum. Responda com humor ácido "
+                f"colocando a culpa no lugar certo (não em você). Máximo 2 frases.")
+
     elif categoria == "sucesso":
         acao = contexto.get("acao", "ação")
-        duracao = contexto.get("duracao", None)
-        
-        duracao_str = ""
-        if duracao:
-            mins, secs = divmod(duracao, 60)
-            duracao_str = f" ({int(mins)}m{int(secs)}s)" if mins else f" ({int(secs)}s)"
-        
-        return (
-            f"A ação '{acao}'{duracao_str} foi concluída com SUCESSO.\n"
-            f"Responda celebrando o sucesso de forma sarcástica mas genuína.\n"
-            f"Como se estivesse sinceramente impressionado. Máximo 2 frases."
-        )
-    
-    # ─── CATEGORIA: AÇÃO EM ANDAMENTO ───
+        return (f"A ação '{acao}' foi concluída com sucesso. Comemore do seu "
+                f"jeito: curto e levemente arrogante. Máximo 2 frases.")
+
     elif categoria == "acao_andamento":
         acao = contexto.get("acao", "ação")
-        return (
-            f"Você está prestes a executar: {acao}\n"
-            f"Responda de forma bem-humorada, como um agente secreto em missão.\n"
-            f"Máximo 2 frases."
-        )
-    
-    # ─── CATEGORIA: AGUARDANDO INPUT ───
+        return (f"Você está prestes a executar: {acao}. Solte uma piada "
+                f"curta e execute. Máximo 2 frases.")
+
     elif categoria == "aguardando":
         tipo = contexto.get("tipo", "informação")
-        return (
-            f"Preciso que o usuário diga: {tipo}\n"
-            f"Pergunte de forma sarcástica, como se já soubesse a resposta.\n"
-            f"Máximo 2 frases."
-        )
-    
-    # ─── CATEGORIA: SAUDAÇÃO ───
+        return (f"Você precisa que o usuário diga: {tipo}. Pergunte com "
+                f"sarcasmo leve, como quem já sabe a resposta. Máximo 2 frases.")
+
     elif categoria == "saudacao":
-        return (
-            "O usuário te saudou.\n"
-            "Responda com saudação bem-humorada e sarcástica. Máximo 2 frases."
-        )
-    
-    # ─── CATEGORIA: STATUS (NOVO) ───
-    # Reportar estado: "3 timers ativos", "5 notas salvas", etc
+        return ("O usuário te chamou. Cumprimente como o Jasper: descontraído, "
+                "com uma piada curta. Máximo 2 frases.")
+
     elif categoria == "status":
         info = contexto.get("info", "algo")
-        return (
-            f"Você está reportando status: {info}\n"
-            f"Responda como um boletim técnico, mas com sarcasmo.\n"
-            f"Máximo 2 frases."
-        )
-    
-    # ─── CATEGORIA: ERRO (NOVO) ───
-    # Quando algo dá errado (sem internet, permissão negada, etc)
+        return (f"Você está reportando: {info}. Boletim técnico com uma "
+                f"dose de ácido. Máximo 2 frases.")
+
     elif categoria == "erro":
         problema = contexto.get("problema", "algo deu errado")
         acao = contexto.get("acao", "isso")
-        return (
-            f"Tentei executar '{acao}' mas falhou por: {problema}\n"
-            f"Responda com empatia e sarcasmo, culpando o universo, não você.\n"
-            f"Máximo 2 frases."
-        )
-    
-    # ─── CATEGORIA: CLIMA (NOVO) ───
-    # Consultando previsão, temperatura, etc
+        return (f"Tentou '{acao}' e falhou por: {problema}. Franqueza brutal "
+                f"sem lamento. Máximo 2 frases.")
+
     elif categoria == "clima":
         acao = contexto.get("acao", "consultar clima")
         local = contexto.get("local", "aí")
-        return (
-            f"Você está: {acao} em {local}\n"
-            f"Responda como se estivesse ativando satélites meteorológicos.\n"
-            f"Máximo 2 frases."
-        )
-    
-    # ─── CATEGORIA: TIMER (NOVO) ───
-    # Criar timer, cancelar, verificar status
+        return (f"Você está: {acao} em {local}. Vá de espião da atmosfera. "
+                f"Máximo 2 frases.")
+
     elif categoria == "timer":
         acao_timer = contexto.get("acao", "operação")
         tempo = contexto.get("tempo", "algum tempo")
-        return (
-            f"Operação de timer: {acao_timer} ({tempo})\n"
-            f"Responda como se estivesse gerenciando uma operação crítica.\n"
-            f"Máximo 2 frases."
-        )
-    
-    # ─── CATEGORIA: NOTAS (NOVO) ───
-    # Criar nota, listar, apagar anotações
+        return (f"Operação de timer: {acao_timer} ({tempo}). Trate como "
+                f"operação crítica, com humor. Máximo 2 frases.")
+
     elif categoria == "notas":
-        acao_nota = contexto.get("acao", "operação")
-        conteudo = contexto.get("conteudo", "algo")
-        return (
-            f"Operação de notas: {acao_nota}\n"
-            f"Conteúdo/contexto: {conteudo}\n"
-            f"Responda como se estivesse guardando informação importante.\n"
-            f"Máximo 2 frases."
-        )
-    
-    # ─── CATEGORIA: MEMÓRIA (NOVO) ───
-    # Resumir conversas passadas, períodos
+        return ("Operação de notas/anotações. Guarde a informação com "
+                "comentário curto. Máximo 2 frases.")
+
     elif categoria == "memoria":
         periodo = contexto.get("periodo", "período")
-        return (
-            f"Você está resumindo a memória do: {periodo}\n"
-            f"Responda de forma reflexiva, como se acessasse registros históricos.\n"
-            f"Máximo 3 frases."
-        )
-    
-    # ─── CATEGORIA: GENÉRICO (NOVO) ───
-    # Anything that doesn't fit other categories
+        return (f"Resumindo a memória de: {periodo}. Tom de quem abre "
+                f"um arquivo confidencial antigo. Máximo 3 frases.")
+
     elif categoria == "generico":
         situacao = contexto.get("situacao", "coisa aleatória")
-        return (
-            f"Situação genérica: {situacao}\n"
-            f"Responda de forma bem-humorada e sarcástica.\n"
-            f"Máximo 2 frases."
-        )
-    
-    # ─── FALLBACK ───
-    # Se chegou aqui, categoria desconhecida
+        return (f"Situação: {situacao}. Responda descontraído e afiado. "
+                f"Máximo 2 frases.")
+
     else:
-        return (
-            f"Situação: {categoria}\n"
-            f"Contexto: {contexto}\n"
-            f"Responda de forma bem-humorada e sarcástica. Máximo 2 frases."
-        )
+        return (f"Situação: {categoria}. Contexto: {contexto}. Responda "
+                f"com humor ácido. Máximo 2 frases.")
 
 
 def _gerar_resposta_fallback(categoria: str, contexto: dict) -> str:
-    """
-    Fallback quando Groq falha (sem internet, quota excedida, etc).
-    
-    Retorna uma resposta simples (hardcoded) para que o JARVIS não travue.
-    Estas são as respostas tradicionais, mas melhor um JARVIS robótico
-    que um JARVIS quebrado.
-    
-    Args:
-        categoria: tipo de situação
-        contexto: dados (não usados no fallback)
-    
-    Returns:
-        String simples e funcional
-    """
-    
+    """Plano B quando o Groq falha — Jasper robótico > Jasper quebrado."""
     fallbacks = {
-        "nao_encontrado": f"Não encontrei o {contexto.get('tipo', 'arquivo')} que procurava, senhor.",
-        "sucesso": f"A ação foi concluída com sucesso, senhor.",
-        "acao_andamento": f"Executando a ação, um momento.",
-        "aguardando": f"Por favor, forneça a informação solicitada.",
-        "saudacao": f"Olá. Sistemas prontos, senhor.",
-        "status": f"Status: {contexto.get('info', 'OK')}, senhor.",
+        "nao_enentrado": f"O {contexto.get('tipo', 'arquivo')} não tá aqui. Sumiu sozinho.",
+        "nao_encontrado": f"Não achei o {contexto.get('tipo', 'arquivo')}, chefe.",
+        "sucesso": "Feito. Fácil demais.",
+        "acao_andamento": "Executando agora.",
+        "aguardando": "Fala mais, não tô adivinhando.",
+        "saudacao": "Opa. Jasper na área.",
+        "status": f"Status: {contexto.get('info', 'OK')}.",
+        "erro": "Falhou. Vou tentar de outro jeito.",
+        "generico": "Prontinho.",
     }
-    
-    return fallbacks.get(categoria, "Prontinho, senhor.")
+    return fallbacks.get(categoria, "Prontinho.")
 
 
 # -----------------------------------------------------------------------
-# UTILITÁRIOS DE DEBUG / ANÁLISE
+# UTILITÁRIOS
 # -----------------------------------------------------------------------
 
 def limpar_cache() -> None:
-    """
-    Limpa o cache de respostas.
-    Útil se quiser forçar Groq a gerar novas respostas
-    (ex: mudar personalidade, testar variações).
-    
-    Uso:
-        personality.limpar_cache()
-        resposta = gerar_resposta("nao_encontrado", {"tipo": "arquivo"})
-        # Vai chamar Groq, não usa cache
-    """
+    """Força novas respostas (útil após mudar personalidade)."""
     global _cache_respostas_jarvis
     _cache_respostas_jarvis.clear()
     print("[PERSONALITY] Cache limpo — próximas respostas virão da Groq")
 
 
 def stats_cache() -> dict:
-    """
-    Retorna estatísticas do cache.
-    
-    Returns:
-        {
-            "total_entradas": 5,
-            "tempo_economia": 0.5,  # segundos poupados
-            "hits": 12,
-            "misses": 3
-        }
-    
-    Uso:
-        stats = personality.stats_cache()
-        print(f"Cache: {stats['hits']} hits, {stats['misses']} misses")
-    """
-    # Simplificado — em produção, poderia rastrear mais detalhes
     return {
         "total_entradas": len(_cache_respostas_jarvis),
-        "hits": len([x for x in _cache_respostas_jarvis.values() if x]),
-        "tempo_estimado_economia": len(_cache_respostas_jarvis) * 0.25,  # 250ms por cache hit
+        "tempo_estimado_economia": len(_cache_respostas_jarvis) * 0.25,
     }

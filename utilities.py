@@ -27,6 +27,8 @@ import time
 import datetime
 import threading
 import requests
+import json
+import os
 from groq import Groq
 from voice import jarvis_voice
 
@@ -45,13 +47,12 @@ try:
     )
 except ImportError as _e:
     print(f"[UTILITIES] AVISO: config.py incompleto: {_e}")
-    GROQ_API_KEY       = "sua_chave_aqui"
-    GROQ_MODELO        = "llama-3.1-8b-instant"
-    GROQ_MAX_TOKENS    = 200
-    GROQ_TEMPERATURA   = 0.7
-    GROQ_SYSTEM_PROMPT = "Você é JARVIS. Responda em português, de forma concisa e sem markdown."
-
-
+    GROQ_API_KEY       = ""
+    GROQ_MODELO        = "openai/gpt-oss-20b"
+    GROQ_MAX_TOKENS    = 1024
+    GROQ_TEMPERATURA   = 0.9
+    GROQ_SYSTEM_PROMPT = ("Você é JASPER. Responda em português, conciso "
+                          "e sem markdown.")
 # -----------------------------------------------------------------------
 # CLIENTE GROQ — singleton lazy
 # -----------------------------------------------------------------------
@@ -193,22 +194,60 @@ def obter_previsao_hoje() -> str:
 
 
 # -----------------------------------------------------------------------
-# MÓDULO DE TIMER
+# MÓDULO DE TIMER — com PERSISTÊNCIA (jarvis_timers.json)
+# Timers sobrevivem a restarts: o horário ABSOLUTO de disparo vai pro
+# disco; no boot, reativar_timers() compara com o relógio e reagendou
+# (ou avisa o que foi perdido enquanto o JARVIS esteve fechado).
 # -----------------------------------------------------------------------
 
-_timers_ativos:    dict = {}
+_TIMER_ARQ = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "jarvis_timers.json")
+
+_timers_ativos:    dict = {}   # {id: {"timer": Timer, "nome": str, "dispara_em": float}}
 _timer_id_contador = 0
 _lock_timers       = threading.Lock()
+
+
+def _salvar_timers_disco():
+    """Grava os timers ativos (horário absoluto) em jarvis_timers.json."""
+    with _lock_timers:
+        dados = [{"id": tid, "nome": info["nome"],
+                  "dispara_em": info["dispara_em"]}
+                 for tid, info in _timers_ativos.items()]
+    try:
+        with open(_TIMER_ARQ, "w", encoding="utf-8") as f:
+            json.dump(dados, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print(f"[UTILITIES] Falha ao salvar timers em disco: {e}")
 
 
 def _callback_timer(nome: str, timer_id: int):
     with _lock_timers:
         _timers_ativos.pop(timer_id, None)
+    _salvar_timers_disco()   # disparou → sai do disco também
     hora_str = datetime.datetime.now().strftime("%H:%M")
     if nome:
         jarvis_voice.falar(f"Senhor, o timer '{nome}' finalizou. São {hora_str}.")
     else:
         jarvis_voice.falar(f"Senhor, seu timer finalizou. São {hora_str}.")
+
+
+def _agendar_timer(segundos: float, nome: str) -> int:
+    """Cria o Timer, registra em memória E em disco. Retorna o id."""
+    global _timer_id_contador
+    with _lock_timers:
+        _timer_id_contador += 1
+        timer_id = _timer_id_contador
+        t = threading.Timer(segundos, _callback_timer, args=(nome, timer_id))
+        t.daemon = True
+        _timers_ativos[timer_id] = {
+            "timer": t,
+            "nome": nome,
+            "dispara_em": time.time() + segundos,
+        }
+        t.start()
+    _salvar_timers_disco()
+    return timer_id
 
 
 def criar_timer(segundos: int, nome: str = "") -> str:
@@ -217,13 +256,7 @@ def criar_timer(segundos: int, nome: str = "") -> str:
     if segundos <= 0:
         return "Timer deve ser > 0 segundos, senhor."
 
-    with _lock_timers:
-        _timer_id_contador += 1
-        timer_id = _timer_id_contador
-        t = threading.Timer(segundos, _callback_timer, args=(nome, timer_id))
-        t.daemon = True
-        _timers_ativos[timer_id] = t
-        t.start()
+    _agendar_timer(segundos, nome)
 
     horario_fim = (datetime.datetime.now() + datetime.timedelta(seconds=segundos)).strftime("%H:%M")
     h, resto = divmod(segundos, 3600)
@@ -242,9 +275,10 @@ def criar_timer(segundos: int, nome: str = "") -> str:
 def cancelar_timers() -> str:
     with _lock_timers:
         quantidade = len(_timers_ativos)
-        for t in _timers_ativos.values():
-            t.cancel()
+        for info in _timers_ativos.values():
+            info["timer"].cancel()
         _timers_ativos.clear()
+    _salvar_timers_disco()   # arquivo fica vazio
 
     if quantidade == 0:
         return "Nenhum timer ativo, senhor."
@@ -260,6 +294,51 @@ def status_timers() -> str:
         return "Nenhum timer no momento, senhor."
     s = "s" if quantidade > 1 else ""
     return f"Há {quantidade} timer{s} ativo{s} no momento."
+
+
+def reativar_timers():
+    """
+    [BOOT-PERSIST] Recarrega os timers do disco:
+    - disparo no FUTURO → reagendado pro segundo exato;
+    - perdeu há menos de 5 min → dispara em 1s (atrasado, ainda serve);
+    - perdeu há mais → avisa a perda com o horário original e limpa.
+    Chame no main.py logo após o listener subir.
+    """
+    if not os.path.exists(_TIMER_ARQ):
+        return
+    try:
+        with open(_TIMER_ARQ, encoding="utf-8") as f:
+            dados = json.load(f)
+    except (OSError, ValueError) as e:
+        print(f"[UTILITIES] Timer persistido ilegível ({e}) — ignorando.")
+        return
+    if not dados:
+        return
+
+    agora = time.time()
+    perdidos = []
+    for item in dados:
+        restante = item.get("dispara_em", 0) - agora
+        nome = item.get("nome", "")
+        if restante > 0:
+            _agendar_timer(restante, nome)
+            print(f"[UTILITIES] Timer reagendado: '{nome}' em {restante/60:.1f} min.")
+        elif restante > -300:   # perdeu há menos de 5 min
+            _agendar_timer(1.0, nome)
+            print(f"[UTILITIES] Timer atrasado dispara já: '{nome}'")
+        else:
+            hora_perdida = datetime.datetime.fromtimestamp(
+                item.get("dispara_em", agora)).strftime("%H:%M")
+            perdidos.append((nome, hora_perdida))
+
+    # reagendar já regravou o disco — os perdidos saem dele naturalmente
+    if perdidos:
+        lista = "; ".join(f"'{nome or 'sem nome'}' às {hora}"
+                          for nome, hora in perdidos)
+        print(f"[UTILITIES] Timers perdidos: {lista}")
+        jarvis_voice.falar(
+            f"Senhor, enquanto estive desligado você perdeu "
+            f"{len(perdidos)} timer(es): {lista}.")
 
 
 # -----------------------------------------------------------------------
@@ -308,7 +387,27 @@ def perguntar_ia(pergunta: str) -> str:
             stream=False,
         )
 
-        return limpar_para_tts(resposta.choices[0].message.content.strip())
+        # [FIX-VAZIA] gpt-oss às vezes queima tokens 'pensando' e devolve
+        # content vazio — retry 1x; ainda vazio → mensagem honesta
+        resposta_txt = (resposta.choices[0].message.content or "").strip()
+        if not resposta_txt:
+            print("[UTILITIES/IA] Resposta vazia — tentando de novo...")
+            resposta = cliente.chat.completions.create(
+                model=GROQ_MODELO,
+                messages=[
+                    {"role": "system", "content": GROQ_SYSTEM_PROMPT},
+                    {"role": "user",   "content": pergunta.strip()},
+                ],
+                temperature=GROQ_TEMPERATURA,
+                max_tokens=GROQ_MAX_TOKENS,
+                top_p=1,
+                stream=False,
+            )
+            resposta_txt = (resposta.choices[0].message.content or "").strip()
+
+        if not resposta_txt:
+            return "A IA ficou muda nessa. Reformula que eu tento de novo, chefe."
+        return limpar_para_tts(resposta_txt)
 
     except ValueError as e:
         print(f"[UTILITIES/IA] Config: {e}")

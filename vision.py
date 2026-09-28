@@ -35,7 +35,7 @@ load_dotenv()
 # -----------------------------------------------------------------------
 
 PASTA_FRAMES       = os.path.join(os.path.expanduser("~"), "Jarvis_frames")
-GROQ_VISION_MODELO = "meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_VISION_MODELO = "qwen/qwen3.8-27b"
 JPEG_QUALIDADE     = 85
 
 PROMPT_PADRAO = (
@@ -48,10 +48,9 @@ VISION_SYSTEM_PROMPT = (
     "Você é JARVIS, um assistente de IA pessoal. "
     "Descreva imagens de forma direta e concisa em português brasileiro. "
     "Sem markdown, sem bullets, sem emojis. "
-    "o homem de oculos e barba é seu criador"
+    "O homem de óculos e barba é seu criador. "
     "Máximo de 3 frases curtas e naturais, como se estivesse conversando."
 )
-
 # -----------------------------------------------------------------------
 # ESTADO INTERNO
 # -----------------------------------------------------------------------
